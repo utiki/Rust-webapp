@@ -116,8 +116,7 @@ jobs:
           else
             PROMPT_FILE=".github/followup-prompt.txt"
             MAX_TOKENS=2500
-            python3 .github/scripts/extract_body.py
-            EXISTING_BODY=$(cat existing_body.txt)
+            EXISTING_BODY=$(awk 'p; /^---$/{p=1}' existing_review.md)
             USER_MSG="${IGNORE_INSTR}## 既存のレビューコメント\n${EXISTING_BODY}\n\n## 新しいdiff\n\`\`\`diff\n${DIFF}\n\`\`\`"
           fi
 
