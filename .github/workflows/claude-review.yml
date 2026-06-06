@@ -185,7 +185,7 @@ jobs:
 
           {
             echo "<!-- claude-review -->"
-            echo "<details>"
+            echo "<details open>"
             printf '<summary>🤖 Claude Code Review — 🔴 Critical: %s件 | 🟠 Major: %s件 | 🟡 Minor: %s件 | 🟢 Suggestion: %s件</summary>\n' "$C" "$MA" "$MI" "$S"
             echo ""
             echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
@@ -201,15 +201,19 @@ jobs:
             echo "</details>"
           } > post_body.md
 
-          if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
+          # synchronize（新コミット）の場合は常に新規作成
+          # /claude-ignore の場合は既存コメントを更新
+          IS_SYNC="${{ github.event.action == 'synchronize' }}"
+
+          if [ "$IS_SYNC" = "true" ] || [ -z "$COMMENT_ID" ] || [ "$COMMENT_ID" = "null" ]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file post_body.md
+            echo "新規コメントを作成しました"
+          else
             jq -n --rawfile body post_body.md '{body: $body}' > patch.json
             PATCH_RESULT=$(gh api repos/$REPO/issues/comments/$COMMENT_ID \
               --method PATCH \
               --input patch.json 2>&1)
             echo "PATCH result: $?"
             echo "PATCH response first 100: ${PATCH_RESULT:0:100}"
-            echo "コメントを更新しました"
-          else
-            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file post_body.md
-            echo "コメントを作成しました"
+            echo "既存コメントを更新しました"
           fi
