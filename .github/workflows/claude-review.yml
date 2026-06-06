@@ -13,7 +13,8 @@ jobs:
       github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
-       startsWith(github.event.comment.body, '/claude-ignore'))
+       (startsWith(github.event.comment.body, '/claude-ignore') ||
+        contains(github.event.comment.body, '@Review')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -35,18 +36,24 @@ jobs:
             PR_INFO=$(gh api repos/$REPO/pulls/$PR_NUMBER)
             BASE=$(echo "$PR_INFO" | jq -r '.base.ref')
             HEAD=$(echo "$PR_INFO" | jq -r '.head.ref')
+            TITLE=$(echo "$PR_INFO" | jq -r '.title')
+            BODY=$(echo "$PR_INFO" | jq -r '.body // ""')
             git fetch origin "$BASE" "$HEAD" 2>/dev/null || true
+            git diff "origin/$BASE".."origin/$HEAD" \
+              -- ':!.github/*' ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+              > pr.diff
           else
             PR_NUMBER=${{ github.event.pull_request.number }}
-            BASE=${{ github.base_ref }}
-            HEAD=${{ github.head_ref }}
+            TITLE="${{ github.event.pull_request.title }}"
+            BODY="${{ github.event.pull_request.body }}"
+            git diff "origin/${{ github.base_ref }}".."origin/${{ github.head_ref }}" \
+              -- ':!.github/*' ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+              > pr.diff
           fi
           echo "$PR_NUMBER" > pr_number.txt
-
-          git diff "origin/$BASE".."origin/$HEAD" \
-            -- ':!.github/*' ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
-            > pr.diff
-          echo "diff size: $(wc -c < pr.diff) bytes"
+          echo "$TITLE"     > pr_title.txt
+          echo "$BODY"      > pr_body.txt
+          echo "diff: $(wc -c < pr.diff) bytes"
 
       - name: Collect ignore list
         env:
@@ -64,162 +71,131 @@ jobs:
           echo "$IGNORE_LIST" > ignore_list.txt
 
       - name: Get existing review comment
+        id: existing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           PR_NUMBER=$(cat pr_number.txt)
-
-          REVIEW_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
+          COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
             --jq '[.[] | select(.body | contains("<!-- claude-review -->"))] | first // {}')
-          REVIEW_COMMENT_ID=$(echo "$REVIEW_COMMENT" | jq -r '.id // ""')
-          EXISTING_REVIEW=$(echo "$REVIEW_COMMENT" | jq -r '.body // ""')
-
-          echo "$REVIEW_COMMENT_ID" > review_comment_id.txt
-          echo "$EXISTING_REVIEW" > existing_review.md
-
-          if [ -z "$EXISTING_REVIEW" ]; then
-            echo "first" > review_mode.txt
+          ID=$(echo "$COMMENT" | jq -r '.id // ""')
+          echo "$ID" > comment_id.txt
+          echo "$COMMENT" | jq -r '.body // ""' > existing_review.md
+          if [ -z "$ID" ]; then
+            echo "mode=first" >> $GITHUB_OUTPUT
           else
-            echo "followup" > review_mode.txt
-            python3 .github/scripts/extract_findings.py
+            echo "mode=followup" >> $GITHUB_OUTPUT
           fi
 
-      - name: Claude Review
+      - name: Build findings list (followup only)
+        if: steps.existing.outputs.mode == 'followup'
+        run: python3 .github/scripts/extract_findings.py
+
+      - name: Call Claude API
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODE: ${{ steps.existing.outputs.mode }}
+        run: |
+          DIFF=$(cat pr.diff)
+          if [ ${#DIFF} -gt 8000 ]; then
+            DIFF="${DIFF:0:8000}"$'\n[... 省略 ...]'
+          fi
+          PR_TITLE=$(cat pr_title.txt)
+          PR_BODY=$(cat pr_body.txt)
+          PR_BODY="${PR_BODY:-（説明なし）}"
+          IGNORE_LIST=$(cat ignore_list.txt)
+
+          if [ -n "$IGNORE_LIST" ]; then
+            IGNORE_INSTR="除外指定（以下の番号は出力しない）: ${IGNORE_LIST}\n\n"
+          else
+            IGNORE_INSTR=""
+          fi
+
+          if [ "$MODE" = "first" ]; then
+            PROMPT_FILE=".github/review-prompt.txt"
+            MAX_TOKENS=3000
+            USER_MSG="${IGNORE_INSTR}PRタイトル: ${PR_TITLE}\nPR説明: ${PR_BODY}\n\n差分:\n\`\`\`diff\n${DIFF}\n\`\`\`"
+          else
+            PROMPT_FILE=".github/followup-prompt.txt"
+            MAX_TOKENS=2000
+            FINDINGS=$(cat findings_list.txt)
+            USER_MSG="${IGNORE_INSTR}既存の指摘:\n${FINDINGS}\n\n差分:\n\`\`\`diff\n${DIFF}\n\`\`\`"
+          fi
+
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: prompt-caching-2024-07-31" \
+            -H "content-type: application/json" \
+            -d "$(jq -n \
+              --rawfile sys "$PROMPT_FILE" \
+              --arg msg "$USER_MSG" \
+              --argjson tok "$MAX_TOKENS" \
+              '{model:"claude-sonnet-4-6", max_tokens:$tok,
+                system:[{type:"text",text:$sys,cache_control:{type:"ephemeral"}}],
+                messages:[{role:"user",content:$msg}]}')")
+
+          echo "$RESPONSE" | jq -r '.content[0].text // "エラー: レビュー取得失敗"' > review_output.txt
+          echo "Claude response: $(wc -c < review_output.txt) bytes"
+
+      - name: Build comment (first review)
+        if: steps.existing.outputs.mode == 'first'
+        run: |
+          IGNORE_LIST=$(cat ignore_list.txt)
+          {
+            echo "## 🤖 Claude Code Review"
+            echo "<!-- claude-review -->"
+            echo ""
+            echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
+            echo "> 再レビューするには \`@Review\` とコメントしてください。"
+            if [ -n "$IGNORE_LIST" ]; then
+              echo ""
+              echo "> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\`"
+            fi
+            echo ""
+            echo "---"
+            echo ""
+            cat review_output.txt
+          } > post_body.md
+
+      - name: Build comment (followup)
+        if: steps.existing.outputs.mode == 'followup'
+        run: |
+          IGNORE_LIST=$(cat ignore_list.txt)
+          FIXED=$(grep '^FIXED:' review_output.txt | sed 's/FIXED://' | tr -d ' ')
+          awk '/^NEW_FINDINGS:/{found=1;next} found{print}' review_output.txt > new_findings.md
+          echo "$FIXED" > fixed_numbers.txt
+          python3 .github/scripts/update_comment.py
+          {
+            echo "## 🤖 Claude Code Review"
+            echo "<!-- claude-review -->"
+            echo ""
+            echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
+            echo "> 再レビューするには \`@Review\` とコメントしてください。"
+            if [ -n "$IGNORE_LIST" ]; then
+              echo ""
+              echo "> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\`"
+            fi
+            echo ""
+            echo "---"
+            echo ""
+            cat updated_comment.md
+          } > post_body.md
+
+      - name: Post or update comment
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_TITLE: ${{ github.event.pull_request.title || github.event.issue.title }}
-          PR_BODY: ${{ github.event.pull_request.body || github.event.issue.body }}
           REPO: ${{ github.repository }}
         run: |
           PR_NUMBER=$(cat pr_number.txt)
-          DIFF=$(cat pr.diff)
-          REVIEW_MODE=$(cat review_mode.txt)
-          REVIEW_COMMENT_ID=$(cat review_comment_id.txt)
-          IGNORE_LIST=$(cat ignore_list.txt)
-          PR_BODY="${PR_BODY:-（説明なし）}"
-
-          if [ "$REVIEW_MODE" = "first" ]; then
-            DIFF_LIMIT=10000
-            MAX_TOKENS=3000
-          else
-            DIFF_LIMIT=5000
-            MAX_TOKENS=2000
-          fi
-
-          if [ ${#DIFF} -gt $DIFF_LIMIT ]; then
-            DIFF="${DIFF:0:$DIFF_LIMIT}"$'\n\n[... diff が大きいため省略されました ...]'
-          fi
-
-          if [ -n "$IGNORE_LIST" ]; then
-            IGNORE_INSTRUCTION="除外指定: 以下の番号の指摘は出力しないでください: ${IGNORE_LIST}\n\n"
-          else
-            IGNORE_INSTRUCTION=""
-          fi
-
-          if [ "$REVIEW_MODE" = "first" ]; then
-            USER_CONTENT="${IGNORE_INSTRUCTION}PRタイトル: ${PR_TITLE}\nPR説明: ${PR_BODY}\n\n差分:\n\`\`\`diff\n${DIFF}\n\`\`\`"
-          else
-            FINDINGS_LIST=$(cat findings_list.txt)
-            USER_CONTENT="以下の既存の指摘リストと新しいdiffを照合し、必ずこの形式のみで出力してください:\n\nFIXED:4,5  （修正済み番号をカンマ区切りで、なければ FIXED:）\n\nNEW_FINDINGS:\n（新規指摘を通常フォーマットで。なければ「なし」）\n\n既存の指摘:\n${FINDINGS_LIST}\n\ndiff:\n\`\`\`diff\n${DIFF}\n\`\`\`"
-          fi
-
-          MAX_RETRY=3
-          RETRY=0
-          REVIEW=""
-
-          if [ "$REVIEW_MODE" = "first" ]; then
-            SYSTEM_PROMPT_FILE=".github/review-prompt.txt"
-          else
-            SYSTEM_PROMPT_FILE=".github/followup-prompt.txt"
-          fi
-
-          while [ $RETRY -lt $MAX_RETRY ]; do
-            RESPONSE=$(curl -s --max-time 60 https://api.anthropic.com/v1/messages \
-              -H "x-api-key: $ANTHROPIC_API_KEY" \
-              -H "anthropic-version: 2023-06-01" \
-              -H "anthropic-beta: prompt-caching-2024-07-31" \
-              -H "content-type: application/json" \
-              -d "$(jq -n \
-                --rawfile system_prompt "$SYSTEM_PROMPT_FILE" \
-                --arg user_content "$USER_CONTENT" \
-                --argjson max_tokens "$MAX_TOKENS" \
-                '{
-                  model: "claude-sonnet-4-6",
-                  max_tokens: $max_tokens,
-                  system: [{
-                    type: "text",
-                    text: $system_prompt,
-                    cache_control: {type: "ephemeral"}
-                  }],
-                  messages: [{role: "user", content: $user_content}]
-                }'
-              )")
-
-            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
-            if [ -z "$ERROR" ]; then
-              REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // ""')
-              [ -n "$REVIEW" ] && break
-            fi
-            RETRY=$((RETRY + 1))
-            echo "APIリトライ $RETRY/$MAX_RETRY エラー: $ERROR"
-            sleep 5
-          done
-
-          [ -z "$REVIEW" ] && REVIEW="⚠️ APIエラー（3回リトライ後も失敗）: ${ERROR:-不明なエラー}"
-
-          if [ "$REVIEW_MODE" = "followup" ]; then
-            FIXED_NUMBERS=$(echo "$REVIEW" | grep '^FIXED:' | sed 's/FIXED://' | tr -d ' ')
-            NEW_FINDINGS=$(echo "$REVIEW" | awk '/^NEW_FINDINGS:/{found=1; next} found{print}')
-            echo "$FIXED_NUMBERS" > fixed_numbers.txt
-            echo "$NEW_FINDINGS" > new_findings.md
-            python3 .github/scripts/update_comment.py
-            # ヘッダーと更新済み本文を結合
-            if [ -n "$IGNORE_LIST" ]; then
-              IGNORE_NOTICE="> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\` — 解除するには \`/claude-ignore\` コメントを削除してください。"
-            else
-              IGNORE_NOTICE=""
-            fi
-            {
-              echo "## 🤖 Claude Code Review"
-              echo "<!-- claude-review -->"
-              echo ""
-              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
-              [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
-              echo ""
-              echo "---"
-              echo ""
-              cat updated_comment.md
-              echo ""
-            } > post_body.md
-          else
-            if [ -n "$IGNORE_LIST" ]; then
-              IGNORE_NOTICE="> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\` — 解除するには \`/claude-ignore\` コメントを削除してください。"
-            else
-              IGNORE_NOTICE=""
-            fi
-            {
-              echo "## 🤖 Claude Code Review"
-              echo "<!-- claude-review -->"
-              echo ""
-              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
-              [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
-              echo ""
-              echo "---"
-              echo ""
-              echo "$REVIEW"
-              echo ""
-            } > post_body.md
-            POST_BODY=$(cat post_body.md)
-          fi
-
-          if [ -n "$REVIEW_COMMENT_ID" ] && [ "$REVIEW_COMMENT_ID" != "null" ]; then
-            gh api repos/$REPO/issues/comments/$REVIEW_COMMENT_ID \
+          COMMENT_ID=$(cat comment_id.txt)
+          if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
+            gh api repos/$REPO/issues/comments/$COMMENT_ID \
               --method PATCH \
               --field body="$(cat post_body.md)"
-            echo "レビューコメントを更新しました"
+            echo "コメントを更新しました"
           else
             gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file post_body.md
-            echo "レビューコメントを作成しました"
+            echo "コメントを作成しました"
           fi
