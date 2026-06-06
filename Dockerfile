@@ -24,7 +24,7 @@ RUN rustup target add wasm32-unknown-unknown
 
 # cargo-leptos をプリビルドバイナリからインストール
 RUN curl -L \
-    https://github.com/leptos-rs/cargo-leptos/releases/download/v0.3.6/cargo-leptos-x86_64-unknown-linux-musl.tar.gz \
+    https://github.com/leptos-rs/cargo-leptos/releases/download/v0.3.6/cargo-leptos-x86_64-unknown-linux-gnu.tar.gz \
     -o /tmp/cargo-leptos.tar.gz && \
     tar -xzf /tmp/cargo-leptos.tar.gz -C /tmp/ && \
     find /tmp -name 'cargo-leptos' -type f -exec install -m 755 {} /usr/local/bin/cargo-leptos \; && \
