@@ -4,7 +4,7 @@ on:
   pull_request:
     types:
       - opened
-      - synchronize  # 追加コミット時も再レビュー
+      - synchronize
     branches:
       - main
       - develop
@@ -28,6 +28,29 @@ jobs:
           git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr.diff
           echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
 
+      - name: Get previous Claude review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # 直前のClaudeレビューコメントを取得（ID付きで）
+          COMMENT_JSON=$(gh api \
+            repos/$REPO/issues/$PR_NUMBER/comments \
+            --jq '[.[] | select(.body | startswith("## 🤖 Claude Code Review"))] | last // {}')
+
+          PREV_COMMENT_ID=$(echo "$COMMENT_JSON" | jq -r '.id // ""')
+          PREV_REVIEW=$(echo "$COMMENT_JSON" | jq -r '.body // ""')
+
+          # ④ 前回レビューが長すぎる場合は先頭3000文字に制限
+          if [ ${#PREV_REVIEW} -gt 3000 ]; then
+            PREV_REVIEW="${PREV_REVIEW:0:3000}"$'\n[... 前回レビューの一部を省略 ...]'
+          fi
+
+          echo "$PREV_COMMENT_ID" > prev_comment_id.txt
+          echo "$PREV_REVIEW" > prev_review.md
+          echo "前回コメントID: $PREV_COMMENT_ID"
+
       - name: Claude Review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -38,51 +61,97 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           DIFF=$(cat pr.diff)
+          PREV_REVIEW=$(cat prev_review.md)
+          PREV_COMMENT_ID=$(cat prev_comment_id.txt)
 
-          # diffが大きすぎる場合は先頭10000文字に制限
+          # ② PR説明が空のときのフォールバック
+          PR_BODY="${PR_BODY:-（説明なし）}"
+
+          # ④ diffの省略フラグ
+          DIFF_TRUNCATED=""
           if [ ${#DIFF} -gt 10000 ]; then
             DIFF="${DIFF:0:10000}"$'\n\n[... diff が大きいため省略されました ...]'
+            DIFF_TRUNCATED="⚠️ **diff が大きいため一部省略されています。完全なレビューにならない場合があります。**"
           fi
 
-          # Claude API にレビューを依頼
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d "$(jq -n \
-              --arg diff "$DIFF" \
-              --arg title "$PR_TITLE" \
-              --arg body "$PR_BODY" \
-              '{
-                model: "claude-sonnet-4-6",
-                max_tokens: 2048,
-                messages: [{
-                  role: "user",
-                  content: ("あなたはシニアエンジニアとしてコードレビューをしてください。\n\n## PRタイトル\n" + $title + "\n\n## PR説明\n" + $body + "\n\n## 差分\n```diff\n" + $diff + "\n```\n\n以下の観点でレビューし、日本語でMarkdown形式にまとめてください。\n- バグや論理的な問題\n- セキュリティ上の懸念\n- パフォーマンスの問題\n- コードの可読性・保守性\n- 良い点\n\n問題がなければ「✅ 問題なし」と一言で返してください。")
-                }]
-              }'
-            )")
-
-          # エラーレスポンスの確認
-          ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
-          if [ -n "$ERROR" ]; then
-            echo "API Error: $ERROR"
-            REVIEW="⚠️ APIエラー: $ERROR"
+          # 前回レビューがある場合は比較セクションを追加
+          if [ -n "$PREV_REVIEW" ] && [ "$PREV_REVIEW" != "null" ]; then
+            COMPARE_INSTRUCTION="## 前回レビューとの比較\n前回のレビュー内容と今回の差分を比較し、以下を出力してください。\n\n### ✅ 前回から修正された箇所\n前回のCritical・Warningのうち、今回の差分で解消されたものをリストアップしてください。\n\n### ❌ 未修正の箇所\n前回の指摘でまだ残っているものをリストアップしてください。\n\n前回のレビュー内容:\n${PREV_REVIEW}\n\n---\n"
           else
-            REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "レビューの取得に失敗しました"')
+            COMPARE_INSTRUCTION=""
           fi
 
-          # レビュー内容をファイルに書き出す（特殊文字の影響を回避）
+          # ③ APIリトライ（最大3回）
+          MAX_RETRY=3
+          RETRY=0
+          REVIEW=""
+
+          while [ $RETRY -lt $MAX_RETRY ]; do
+            RESPONSE=$(curl -s --max-time 60 https://api.anthropic.com/v1/messages \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "content-type: application/json" \
+              -d "$(jq -n \
+                --arg diff "$DIFF" \
+                --arg title "$PR_TITLE" \
+                --arg body "$PR_BODY" \
+                --arg compare "$COMPARE_INSTRUCTION" \
+                '{
+                  model: "claude-sonnet-4-6",
+                  max_tokens: 3000,
+                  messages: [{
+                    role: "user",
+                    content: ("あなたはシニアエンジニアとしてコードレビューをしてください。\n\nレビュー結果は以下の形式で日本語のMarkdownで出力してください。\n\n---\n\n## 📊 サマリー\n\n| カテゴリ | 件数 |\n|---|---|\n| 🔴 Critical（要修正） | N件 |\n| 🟡 Warning（要検討） | N件 |\n| 🟢 Good（良い点） | N件 |\n\nCriticalが0件なら「✅ マージ可能」と追記する。\n\n---\n\n## 🔴 Critical（要修正）\nバグ・セキュリティ脆弱性・データ損失リスクなど、マージ前に必ず修正が必要な問題。\nファイル名・行番号と具体的な理由をセットで書く。該当なしの場合は「なし」と書く。\n\n## 🟡 Warning（要検討）\nパフォーマンス低下・保守性の問題・命名の不統一など、修正を推奨する問題。\nファイル名・行番号と具体的な理由をセットで書く。該当なしの場合は「なし」と書く。\n\n## 🟢 Good（良い点）\n優れた実装・読みやすいコード・適切なエラーハンドリングなど、評価できる点。該当なしの場合は「なし」と書く。\n\n---\n\n" + $compare + "## レビュー対象\n\n### PRタイトル\n" + $title + "\n\n### PR説明\n" + $body + "\n\n### 差分\n```diff\n" + $diff + "\n```")
+                  }]
+                }'
+              )")
+
+            ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
+            if [ -z "$ERROR" ]; then
+              REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // ""')
+              if [ -n "$REVIEW" ]; then
+                break
+              fi
+            fi
+
+            RETRY=$((RETRY + 1))
+            echo "APIリトライ $RETRY/$MAX_RETRY ... エラー: $ERROR"
+            sleep 5
+          done
+
+          if [ -z "$REVIEW" ]; then
+            REVIEW="⚠️ APIエラー（3回リトライ後も失敗）: ${ERROR:-不明なエラー}"
+          fi
+
+          # レビュー内容をファイルに書き出す
           {
             echo "## 🤖 Claude Code Review"
+            echo ""
+            echo "> **重大度**: 🔴 Critical（要修正）　🟡 Warning（要検討）　🟢 Good（良い点）"
+            # ④ diff省略の警告
+            if [ -n "$DIFF_TRUNCATED" ]; then
+              echo ""
+              echo "$DIFF_TRUNCATED"
+            fi
+            echo ""
+            echo "---"
             echo ""
             echo "$REVIEW"
             echo ""
             echo "---"
-            echo "*このレビューは Claude ( claude-sonnet-4-20250514 ) によって自動生成されました*"
+            echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
           } > review_body.md
 
-          # ファイルを使ってPRにコメントを投稿
-          gh pr comment "$PR_NUMBER" \
-            --repo "$REPO" \
-            --body-file review_body.md
+          # ① 既存コメントがあれば編集、なければ新規作成
+          if [ -n "$PREV_COMMENT_ID" ] && [ "$PREV_COMMENT_ID" != "null" ] && [ "$PREV_COMMENT_ID" != "" ]; then
+            echo "既存コメントを更新: $PREV_COMMENT_ID"
+            gh api \
+              repos/$REPO/issues/comments/$PREV_COMMENT_ID \
+              --method PATCH \
+              --field body="$(cat review_body.md)"
+          else
+            echo "新規コメントを作成"
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
+              --body-file review_body.md
+          fi
