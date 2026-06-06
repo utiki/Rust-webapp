@@ -5,6 +5,9 @@ on:
     types:
       - opened
       - synchronize  # 追加コミット時も再レビュー
+    branches:
+      - main
+      - develop
 
 jobs:
   review:
@@ -70,6 +73,3 @@ jobs:
             --body "## 🤖 Claude Code Review
 
           $REVIEW
-
-          ---
-          *このレビューはClaude ( claude-sonnet-4-20250514 ) によって自動生成されました*"
