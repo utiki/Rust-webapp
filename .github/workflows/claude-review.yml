@@ -186,8 +186,6 @@ jobs:
               echo ""
               cat updated_comment.md
               echo ""
-              echo "---"
-              echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
             } > post_body.md
           else
             if [ -n "$IGNORE_LIST" ]; then
@@ -206,8 +204,6 @@ jobs:
               echo ""
               echo "$REVIEW"
               echo ""
-              echo "---"
-              echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
             } > post_body.md
             POST_BODY=$(cat post_body.md)
           fi
