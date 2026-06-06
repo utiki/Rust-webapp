@@ -92,12 +92,15 @@ jobs:
         if: steps.existing.outputs.mode == 'followup'
         run: python3 .github/scripts/extract_findings.py
 
+      - name: Annotate diff with line numbers
+        run: python3 .github/scripts/annotate_diff.py
+
       - name: Call Claude API
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MODE: ${{ steps.existing.outputs.mode }}
         run: |
-          DIFF=$(cat pr.diff)
+          DIFF=$(cat annotated_diff.txt)
           if [ ${#DIFF} -gt 8000 ]; then
             DIFF="${DIFF:0:8000}"$'\n[... 省略 ...]'
           fi
