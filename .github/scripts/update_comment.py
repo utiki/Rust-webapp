@@ -9,43 +9,26 @@ fixed_nums = [n.strip() for n in fixed_str.split(',') if n.strip()] if fixed_str
 first_sep = raw.find('\n---\n')
 body = raw[first_sep + 5:].strip() if first_sep >= 0 else raw.strip()
 
-# アクティブ部分と修正済み部分を分割
-resolved_sep = re.search(r'\n\n---\n\n### ✅ 修正済み', body)
-if resolved_sep:
-    active_part = body[:resolved_sep.start()]
-    resolved_raw = body[resolved_sep.end():]
-else:
-    active_part = body
-    resolved_raw = ''
-
-# 既存の修正済みアイテムを個別取得
-resolved_items = []
-for line in resolved_raw.strip().split('\n'):
-    line = line.strip()
-    if line and line != 'なし' and not line.startswith('###'):
-        resolved_items.append(line)
-
-# 修正済み番号をアクティブ部分から取り出して移動
-updated_active = active_part
+# 修正済み番号の指摘に取り消し線をつける（移動はしない）
+updated = body
 for num in fixed_nums:
     pattern = re.compile(
-        r'([🔴🟠🟡🟢] )\*\*' + re.escape(num) + r'\.\*\* .+?(?=\n[🔴🟠🟡🟢] \*\*\d+\.\*\*|\n> \[!|\n### |\Z)',
+        r'([🔴🟠🟡🟢] )\*\*' + re.escape(num) + r'\.\*\*(.+?)(?=\n[🔴🟠🟡🟢] \*\*\d+\.\*\*|\n> \[!|\n### |\Z)',
         re.DOTALL
     )
-    match = pattern.search(updated_active)
+    match = pattern.search(updated)
     if match:
-        full_block = match.group(0).strip()
-        lines = full_block.split('\n')
-        first_line = lines[0]
-        rest = '\n'.join(lines[1:])
-        # 1行目の番号の太字を外して取り消し線をつける
-        clean_first = re.sub(r'\*\*' + re.escape(num) + r'\.\*\*', f'{num}.', first_line).strip()
-        # 全文を保持して末尾に ✅ を付ける
-        resolved_block = f'~~{clean_first}~~ ✅'
-        if rest.strip():
-            resolved_block += '\n' + rest
-        resolved_items.append(resolved_block)
-        updated_active = updated_active[:match.start()] + updated_active[match.end():]
+        block = match.group(0)
+        # すでに取り消し線がついていればスキップ
+        if '~~' not in block:
+            lines = block.split('\n')
+            # 1行目の番号の太字を外して取り消し線をつける
+            first = re.sub(r'\*\*' + re.escape(num) + r'\.\*\*', f'{num}.', lines[0]).strip()
+            rest = '\n'.join(lines[1:])
+            new_block = f'~~{first}~~ ✅'
+            if rest.strip():
+                new_block += '\n' + rest
+            updated = updated[:match.start()] + new_block + updated[match.end():]
 
 # 新規指摘をカテゴリセクションに追加
 if new_findings and new_findings.strip() not in ('なし', ''):
@@ -57,32 +40,28 @@ if new_findings and new_findings.strip() not in ('なし', ''):
         for finding in cat_findings:
             finding = finding.strip()
             none_pat = rf'(> \[!{alert}\]\n> [^\n]+\n\n)なし'
-            if re.search(none_pat, updated_active):
-                updated_active = re.sub(none_pat, rf'\1{finding}', updated_active)
+            if re.search(none_pat, updated):
+                updated = re.sub(none_pat, rf'\1{finding}', updated)
             else:
                 sec_pat = re.compile(
                     rf'(> \[!{alert}\]\n> [^\n]+\n\n)(.*?)(\n\n> \[!|\Z)', re.DOTALL)
                 def add(m, f=finding):
                     ex = m.group(2).rstrip()
                     return m.group(1) + (ex if ex != 'なし' else '') + ('\n\n' if ex and ex != 'なし' else '') + f + m.group(3)
-                updated_active = sec_pat.sub(add, updated_active, count=1)
+                updated = sec_pat.sub(add, updated, count=1)
 
-# サマリー件数を更新
-c  = len(re.findall(r'🔴 \*\*\d+\.\*\*', updated_active))
-ma = len(re.findall(r'🟠 \*\*\d+\.\*\*', updated_active))
-mi = len(re.findall(r'🟡 \*\*\d+\.\*\*', updated_active))
-s  = len(re.findall(r'🟢 \*\*\d+\.\*\*', updated_active))
-updated_active = re.sub(r'\| 🔴 Critical \| \d+件 \|',   f'| 🔴 Critical | {c}件 |',   updated_active)
-updated_active = re.sub(r'\| 🟠 Major \| \d+件 \|',      f'| 🟠 Major | {ma}件 |',     updated_active)
-updated_active = re.sub(r'\| 🟡 Minor \| \d+件 \|',      f'| 🟡 Minor | {mi}件 |',     updated_active)
-updated_active = re.sub(r'\| 🟢 Suggestion \| \d+件 \|', f'| 🟢 Suggestion | {s}件 |', updated_active)
+# サマリー件数を更新（取り消し線なしのものだけカウント）
+def count_active(emoji, text):
+    return len(re.findall(rf'{re.escape(emoji)} \*\*\d+\.\*\*(?!.*~~)', text))
 
-# 修正済みセクションを末尾に配置（件数付き）
-count = len(resolved_items)
-resolved_section = f'### ✅ 修正済み（{count}件）\n\n'
-resolved_section += '\n\n---\n\n'.join(resolved_items) if resolved_items else 'なし'
+c  = len(re.findall(r'(?<!~~)🔴 \*\*\d+\.\*\*', updated))
+ma = len(re.findall(r'(?<!~~)🟠 \*\*\d+\.\*\*', updated))
+mi = len(re.findall(r'(?<!~~)🟡 \*\*\d+\.\*\*', updated))
+s  = len(re.findall(r'(?<!~~)🟢 \*\*\d+\.\*\*', updated))
+updated = re.sub(r'\| 🔴 Critical \| \d+件 \|',   f'| 🔴 Critical | {c}件 |',   updated)
+updated = re.sub(r'\| 🟠 Major \| \d+件 \|',      f'| 🟠 Major | {ma}件 |',     updated)
+updated = re.sub(r'\| 🟡 Minor \| \d+件 \|',      f'| 🟡 Minor | {mi}件 |',     updated)
+updated = re.sub(r'\| 🟢 Suggestion \| \d+件 \|', f'| 🟢 Suggestion | {s}件 |', updated)
 
-open('updated_comment.md', 'w').write(
-    updated_active.rstrip() + '\n\n---\n\n' + resolved_section
-)
-print(f"修正済み: {fixed_nums}, 件数: {count}")
+open('updated_comment.md', 'w').write(updated)
+print(f"取り消し線: {fixed_nums}")
