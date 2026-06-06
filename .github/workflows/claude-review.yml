@@ -149,6 +149,8 @@ jobs:
             COMPARE_INSTRUCTION="## 初回レビューとの比較\n以下の初回レビューと今回の差分を照合してください。\n\n### ✅ 初回から修正された箇所\n### ❌ 未修正の箇所\n\n初回レビュー内容:\n${FIRST_REVIEW}\n\n---\n"
           fi
 
+          # システムプロンプトはリポジトリの .github/review-prompt.txt から読み込む
+
           # APIリトライ（最大3回）
           MAX_RETRY=3
           RETRY=0
@@ -161,6 +163,7 @@ jobs:
               -H "anthropic-beta: prompt-caching-2024-07-31" \
               -H "content-type: application/json" \
               -d "$(jq -n \
+                --rawfile system_prompt .github/review-prompt.txt \
                 --arg diff "$DIFF" \
                 --arg title "$PR_TITLE" \
                 --arg body "$PR_BODY" \
@@ -172,7 +175,7 @@ jobs:
                   max_tokens: $max_tokens,
                   system: [{
                     type: "text",
-                    text: "あなたはシニアエンジニアとしてコードレビューをします。\n\n全指摘に通し番号（1, 2, 3...）を付けてください。\n\nレビュー結果は以下の形式で日本語のMarkdownで出力してください。\n\n## 📊 サマリー\n| カテゴリ | 内容 | 件数 |\n|---|---|---|\n| 🔴 Critical | バグ・セキュリティ問題・データ損失リスクなど、必ず直すべき | N件 |\n| 🟠 Major | パフォーマンス問題・設計上の問題など、直すべき | N件 |\n| 🟡 Minor | 可読性・命名規則など、できれば直したい | N件 |\n| 🟢 Suggestion | より良くなる提案・任意 | N件 |\n\nCriticalが0件なら最後に「✅ マージ可能」と書く。\n\n各カテゴリのヘッダーはshields.ioバッジを使って以下の形式で書く（Nは実際の件数）:\n\n![](https://img.shields.io/badge/🔴_Critical-N件-critical)\n🔴 **1.** `src/main.rs:42` — 問題の説明\n\n![](https://img.shields.io/badge/🟠_Major-N件-orange)\n🟠 **2.** `src/app.rs:15` — 問題の説明\n\n![](https://img.shields.io/badge/🟡_Minor-N件-yellow)\n🟡 **3.** `src/lib.rs:10` — 問題の説明\n\n![](https://img.shields.io/badge/🟢_Suggestion-N件-success)\n🟢 **4.** 提案の説明\n\n## 出力ルール\n- 各カテゴリのヘッダーは必ずバッジ画像を使う。該当なしでも ![](https://img.shields.io/badge/🔴_Critical-0件-critical) のように0件バッジを出す\n- 各指摘は `絵文字 **N.** \`ファイル:行番号\` — 説明` の1行形式で書く\n- 説明は1〜2文で簡潔にまとめる\n- details タグや区切り線（---）は使わない\n- 除外指定された番号は絶対に出力しない\n- 比較セクションがあれば必ず前回との差分を出力する",
+                    text: $system_prompt,
                     cache_control: {type: "ephemeral"}
                   }],
                   messages: [{
