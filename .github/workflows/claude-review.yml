@@ -41,12 +41,17 @@ jobs:
             BASE=$(echo "$PR_INFO" | jq -r '.base.ref')
             HEAD=$(echo "$PR_INFO" | jq -r '.head.ref')
             git fetch origin "$BASE" "$HEAD" 2>/dev/null || true
-            git diff origin/$BASE...origin/$HEAD > pr.diff
+            git diff origin/$BASE...origin/$HEAD \
+              -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+              > pr.diff
           else
             PR_NUMBER=${{ github.event.pull_request.number }}
-            git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr.diff
+            git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} \
+              -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+              > pr.diff
           fi
           echo "$PR_NUMBER" > pr_number.txt
+          echo "diff size: $(wc -c < pr.diff) bytes"
 
       - name: Collect ignore list
         env:
@@ -82,8 +87,8 @@ jobs:
           PREV_COMMENT_ID=$(echo "$COMMENT_JSON" | jq -r '.id // ""')
           PREV_REVIEW=$(echo "$COMMENT_JSON" | jq -r '.body // ""')
 
-          if [ ${#PREV_REVIEW} -gt 3000 ]; then
-            PREV_REVIEW="${PREV_REVIEW:0:3000}"$'\n[... 前回レビューの一部を省略 ...]'
+          if [ ${#PREV_REVIEW} -gt 1500 ]; then
+            PREV_REVIEW="${PREV_REVIEW:0:1500}"$'\n[... 前回レビューの一部を省略 ...]'
           fi
 
           echo "$PREV_COMMENT_ID" > prev_comment_id.txt
@@ -106,8 +111,8 @@ jobs:
 
           # diffが大きすぎる場合は省略
           DIFF_TRUNCATED=""
-          if [ ${#DIFF} -gt 10000 ]; then
-            DIFF="${DIFF:0:10000}"$'\n\n[... diff が大きいため省略されました ...]'
+          if [ ${#DIFF} -gt 5000 ]; then
+            DIFF="${DIFF:0:5000}"$'\n\n[... diff が大きいため省略されました ...]'
             DIFF_TRUNCATED="⚠️ **diff が大きいため一部省略されています。**"
           fi
 
@@ -144,7 +149,7 @@ jobs:
                 --arg ignore "$IGNORE_INSTRUCTION" \
                 '{
                   model: "claude-sonnet-4-6",
-                  max_tokens: 3000,
+                  max_tokens: 1500,
                   system: [{
                     type: "text",
                     text: "あなたはシニアエンジニアとしてコードレビューをします。\n\n各指摘には全カテゴリを通じた通し番号を付けてください（1, 2, 3, 4...）。\n\nレビュー結果は以下の形式で日本語のMarkdownで出力してください。\n\n## 📊 サマリー\n| カテゴリ | 件数 | 状態 |\n|---|---|---|\n| 🔴 Critical | N件 | マージ不可 or ✅ なし |\n| 🟡 Warning | N件 | 要検討 or ✅ なし |\n| 🟢 Good | N件 | - |\n\nCriticalが0件なら「✅ マージ可能」と追記する。\n\n<details>\n<summary>🔴 Critical（要修正）N件</summary>\n\nバグ・セキュリティ脆弱性など必ず修正が必要な問題。\n\n**1** `ファイル名:行番号`\n> 理由の説明\n\n</details>\n\n<details>\n<summary>🟡 Warning（要検討）N件</summary>\n\nパフォーマンス・保守性など修正を推奨する問題。\n\n**2** `ファイル名:行番号`\n> 理由の説明\n\n</details>\n\n<details>\n<summary>🟢 Good（良い点）N件</summary>\n\n**3** 優れた実装の説明\n\n</details>\n\n## 出力ルール\n- 番号は全指摘を通じて1から連番にする（カテゴリをまたいで続く）\n- 各 details の summary にはカテゴリ名と件数を入れる\n- 該当なしのカテゴリも details は出力し「なし」と書く\n- 除外指定された番号の指摘は絶対に出力しない\n- 比較セクションがあれば必ず前回との差分を出力する",
