@@ -149,6 +149,10 @@ jobs:
 
           echo "$RESPONSE" | jq -r '.content[0].text // "エラー: レビュー取得失敗"' > review_output.txt
           echo "Claude response: $(wc -c < review_output.txt) bytes"
+          echo "=== REVIEW OUTPUT FIRST 300 CHARS ==="
+          head -c 300 review_output.txt
+          echo ""
+          echo "=== END ==="
 
       - name: Build and post comment
         env:
@@ -176,9 +180,11 @@ jobs:
 
           if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
             jq -n --rawfile body post_body.md '{body: $body}' > patch.json
-            gh api repos/$REPO/issues/comments/$COMMENT_ID \
+            PATCH_RESULT=$(gh api repos/$REPO/issues/comments/$COMMENT_ID \
               --method PATCH \
-              --input patch.json
+              --input patch.json 2>&1)
+            echo "PATCH result: $?"
+            echo "PATCH response first 100: ${PATCH_RESULT:0:100}"
             echo "コメントを更新しました"
           else
             gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file post_body.md
