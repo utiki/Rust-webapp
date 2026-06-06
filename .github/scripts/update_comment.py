@@ -1,6 +1,17 @@
 import re
 
-body = open('existing_review.md').read()
+raw = open('existing_review.md').read()
+
+# ヘッダー（--- より前）とフッター（最後の --- 以降）を除いた本文だけ取り出す
+parts = raw.split('\n---\n')
+if len(parts) >= 3:
+    # 最初の --- より後、最後の --- より前が本文
+    body = '\n---\n'.join(parts[1:-1]).strip()
+elif len(parts) == 2:
+    body = parts[1].strip()
+else:
+    body = raw.strip()
+
 fixed_str = open('fixed_numbers.txt').read().strip()
 new_findings = open('new_findings.md').read().strip()
 
