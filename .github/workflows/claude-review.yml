@@ -8,14 +8,21 @@ on:
     branches:
       - main
       - develop
+  issue_comment:
+    types:
+      - created
 
 jobs:
   review:
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       startsWith(github.event.comment.body, '/claude-ignore'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
-      issues: write
 
     steps:
       - name: Checkout
@@ -23,58 +30,65 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get PR diff
-        run: |
-          git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr.diff
-
-      - name: Check ignored findings（👍リアクションを確認）
+      - name: Get PR info
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          # 以前の個別指摘コメント（<!-- claude-finding:ID --> マーカー付き）を取得
-          gh api repos/$REPO/issues/$PR_NUMBER/comments \
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            PR_NUMBER=${{ github.event.issue.number }}
+            PR_INFO=$(gh api repos/$REPO/pulls/$PR_NUMBER)
+            BASE=$(echo "$PR_INFO" | jq -r '.base.ref')
+            HEAD=$(echo "$PR_INFO" | jq -r '.head.ref')
+            git fetch origin "$BASE" "$HEAD" 2>/dev/null || true
+            git diff origin/$BASE...origin/$HEAD \
+              -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+              > pr.diff
+          else
+            PR_NUMBER=${{ github.event.pull_request.number }}
+            git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} \
+              -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+              > pr.diff
+          fi
+          echo "$PR_NUMBER" > pr_number.txt
+          echo "diff size: $(wc -c < pr.diff) bytes"
+
+      - name: Collect ignore list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          PR_NUMBER=$(cat pr_number.txt)
+
+          # /claude-ignore 1,2,4 形式のコメントから番号を収集
+          IGNORE_LIST=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
             --paginate \
-            --jq '.[] | select(.body | test("<!-- claude-finding:")) | {id: .id, finding_id: (.body | capture("<!-- claude-finding:(?P<fid>[\\w-]+)-->").fid)}' \
-            | jq -s '.' > finding_comments.json
+            --jq '[.[] | select(.body | test("^/claude-ignore\\s")) | .body] | join("\n")' \
+            | grep -oP '(?<=/claude-ignore\s)[\d,\s]+' \
+            | tr -d ' ' \
+            | tr ',' '\n' \
+            | grep -E '^[0-9]+$' \
+            | sort -nu \
+            | paste -sd ',' -)
 
-          echo "指摘コメント数: $(jq 'length' finding_comments.json)"
-
-          # 👍 リアクションがついているIDを除外リストに追加
-          IGNORE_IDS=""
-          while IFS= read -r row; do
-            COMMENT_ID=$(echo "$row" | jq -r '.id')
-            FINDING_ID=$(echo "$row" | jq -r '.finding_id')
-
-            THUMBS_UP=$(gh api \
-              repos/$REPO/issues/comments/$COMMENT_ID/reactions \
-              --jq '[.[] | select(.content == "+1")] | length')
-
-            if [ "$THUMBS_UP" -gt 0 ]; then
-              IGNORE_IDS="${IGNORE_IDS:+$IGNORE_IDS,}$FINDING_ID"
-              echo "除外: $FINDING_ID（👍 $THUMBS_UP件）"
-            fi
-          done < <(jq -c '.[]' finding_comments.json)
-
-          echo "$IGNORE_IDS" > ignore_list.txt
-          echo "除外リスト: $IGNORE_IDS"
+          echo "除外番号: $IGNORE_LIST"
+          echo "$IGNORE_LIST" > ignore_list.txt
 
       - name: Get previous Claude review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          COMMENT_JSON=$(gh api \
-            repos/$REPO/issues/$PR_NUMBER/comments \
+          PR_NUMBER=$(cat pr_number.txt)
+
+          COMMENT_JSON=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
             --jq '[.[] | select(.body | startswith("## 🤖 Claude Code Review"))] | last // {}')
 
           PREV_COMMENT_ID=$(echo "$COMMENT_JSON" | jq -r '.id // ""')
           PREV_REVIEW=$(echo "$COMMENT_JSON" | jq -r '.body // ""')
 
-          if [ ${#PREV_REVIEW} -gt 3000 ]; then
-            PREV_REVIEW="${PREV_REVIEW:0:3000}"$'\n[... 前回レビューの一部を省略 ...]'
+          if [ ${#PREV_REVIEW} -gt 1500 ]; then
+            PREV_REVIEW="${PREV_REVIEW:0:1500}"$'\n[... 前回レビューの一部を省略 ...]'
           fi
 
           echo "$PREV_COMMENT_ID" > prev_comment_id.txt
@@ -84,35 +98,34 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title || github.event.issue.title }}
+          PR_BODY: ${{ github.event.pull_request.body || github.event.issue.body }}
           REPO: ${{ github.repository }}
         run: |
+          PR_NUMBER=$(cat pr_number.txt)
           DIFF=$(cat pr.diff)
           PREV_REVIEW=$(cat prev_review.md)
           PREV_COMMENT_ID=$(cat prev_comment_id.txt)
           IGNORE_LIST=$(cat ignore_list.txt)
-
           PR_BODY="${PR_BODY:-（説明なし）}"
 
-          # diffの省略
+          # diffが大きすぎる場合は省略
           DIFF_TRUNCATED=""
-          if [ ${#DIFF} -gt 10000 ]; then
-            DIFF="${DIFF:0:10000}"$'\n\n[... diff が大きいため省略されました ...]'
+          if [ ${#DIFF} -gt 5000 ]; then
+            DIFF="${DIFF:0:5000}"$'\n\n[... diff が大きいため省略されました ...]'
             DIFF_TRUNCATED="⚠️ **diff が大きいため一部省略されています。**"
           fi
 
           # 除外指示
           if [ -n "$IGNORE_LIST" ]; then
-            IGNORE_INSTRUCTION="## 除外指定\n以下のIDの指摘は出力しないでください（ユーザーが👍で除外しました）: ${IGNORE_LIST}\n\n"
+            IGNORE_INSTRUCTION="## 除外指定\n以下のIDの指摘は出力しないでください: ${IGNORE_LIST}\n\n"
           else
             IGNORE_INSTRUCTION=""
           fi
 
           # 前回レビューとの比較
           if [ -n "$PREV_REVIEW" ] && [ "$PREV_REVIEW" != "null" ]; then
-            COMPARE_INSTRUCTION="## 前回レビューとの比較\n\n### ✅ 前回から修正された箇所\n前回のCritical・Warningのうち今回の差分で解消されたものをリストアップしてください。\n\n### ❌ 未修正の箇所\n前回の指摘でまだ残っているものをリストアップしてください。\n\n前回のレビュー内容:\n${PREV_REVIEW}\n\n---\n"
+            COMPARE_INSTRUCTION="## 前回レビューとの比較\n\n### ✅ 前回から修正された箇所\n### ❌ 未修正の箇所\n\n前回のレビュー内容:\n${PREV_REVIEW}\n\n---\n"
           else
             COMPARE_INSTRUCTION=""
           fi
@@ -136,14 +149,12 @@ jobs:
                 --arg ignore "$IGNORE_INSTRUCTION" \
                 '{
                   model: "claude-sonnet-4-6",
-                  max_tokens: 3000,
-                  system: [
-                    {
-                      type: "text",
-                      text: "あなたはシニアエンジニアとしてコードレビューをします。\n\n各指摘には必ずカテゴリ略称と連番でIDを付けてください。\n例: Critical-1, Warning-1, Good-1 など\n\nレビュー結果は以下の形式で日本語のMarkdownで出力してください。\n\n---\n\n## 📊 サマリー\n\n| カテゴリ | 件数 |\n|---|---|\n| 🔴 Critical（要修正） | N件 |\n| 🟡 Warning（要検討） | N件 |\n| 🟢 Good（良い点） | N件 |\n\nCriticalが0件なら「✅ マージ可能」と追記する。\n\n---\n\n## 🔴 Critical（要修正）\n各指摘の先頭に `**Critical-1**` のようにIDを付ける。該当なしは「なし」。\n\n## 🟡 Warning（要検討）\n各指摘の先頭に `**Warning-1**` のようにIDを付ける。該当なしは「なし」。\n\n## 🟢 Good（良い点）\n各指摘の先頭に `**Good-1**` のようにIDを付ける。該当なしは「なし」。\n\n---\n\n## 出力ルール\n- 各指摘は「ID」「ファイル名・行番号」「具体的な理由」をセットで書く\n- 除外指定されたIDは絶対に出力しない\n- 比較セクションがあれば必ず前回との差分を出力する",
-                      cache_control: {type: "ephemeral"}
-                    }
-                  ],
+                  max_tokens: 1500,
+                  system: [{
+                    type: "text",
+                    text: "あなたはシニアエンジニアとしてコードレビューをします。\n\n各指摘には全カテゴリを通じた通し番号を付けてください（1, 2, 3, 4...）。\n\nレビュー結果は以下の形式で日本語のMarkdownで出力してください。\n\n## 📊 サマリー\n| カテゴリ | 件数 | 状態 |\n|---|---|---|\n| 🔴 Critical | N件 | マージ不可 or ✅ なし |\n| 🟡 Warning | N件 | 要検討 or ✅ なし |\n| 🟢 Good | N件 | - |\n\nCriticalが0件なら「✅ マージ可能」と追記する。\n\n<details>\n<summary>🔴 Critical（要修正）N件</summary>\n\nバグ・セキュリティ脆弱性など必ず修正が必要な問題。\n\n**1** `ファイル名:行番号`\n> 理由の説明\n\n</details>\n\n<details>\n<summary>🟡 Warning（要検討）N件</summary>\n\nパフォーマンス・保守性など修正を推奨する問題。\n\n**2** `ファイル名:行番号`\n> 理由の説明\n\n</details>\n\n<details>\n<summary>🟢 Good（良い点）N件</summary>\n\n**3** 優れた実装の説明\n\n</details>\n\n## 出力ルール\n- 番号は全指摘を通じて1から連番にする（カテゴリをまたいで続く）\n- 各 details の summary にはカテゴリ名と件数を入れる\n- 該当なしのカテゴリも details は出力し「なし」と書く\n- 除外指定された番号の指摘は絶対に出力しない\n- 比較セクションがあれば必ず前回との差分を出力する",
+                    cache_control: {type: "ephemeral"}
+                  }],
                   messages: [{
                     role: "user",
                     content: ($ignore + "## レビュー対象\n\n### PRタイトル\n" + $title + "\n\n### PR説明\n" + $body + "\n\n### 差分\n```diff\n" + $diff + "\n```\n\n" + $compare)
@@ -154,9 +165,7 @@ jobs:
             ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
             if [ -z "$ERROR" ]; then
               REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // ""')
-              if [ -n "$REVIEW" ]; then
-                break
-              fi
+              [ -n "$REVIEW" ] && break
             fi
 
             RETRY=$((RETRY + 1))
@@ -164,16 +173,11 @@ jobs:
             sleep 5
           done
 
-          if [ -z "$REVIEW" ]; then
-            REVIEW="⚠️ APIエラー（3回リトライ後も失敗）: ${ERROR:-不明なエラー}"
-          fi
-
-          # レビューをファイルに保存（個別コメント投稿で使う）
-          echo "$REVIEW" > review_output.txt
+          [ -z "$REVIEW" ] && REVIEW="⚠️ APIエラー（3回リトライ後も失敗）: ${ERROR:-不明なエラー}"
 
           # 除外中IDの通知
           if [ -n "$IGNORE_LIST" ]; then
-            IGNORE_NOTICE="> 🚫 **除外中の指摘**: \`$(echo $IGNORE_LIST | sed 's/,/ | /g')\` — 解除するには個別コメントの 👍 を取り消してください。"
+            IGNORE_NOTICE="> 🚫 **除外中の指摘番号**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\` — 解除するには該当の \`/claude-ignore\` コメントを削除してください。"
           else
             IGNORE_NOTICE=""
           fi
@@ -182,7 +186,7 @@ jobs:
             echo "## 🤖 Claude Code Review"
             echo ""
             echo "> **重大度**: 🔴 Critical（要修正）　🟡 Warning（要検討）　🟢 Good（良い点）"
-            echo "> 指摘を除外するには個別コメントの 👍 を押してください。"
+            echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
             [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
             [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
             echo ""
@@ -194,7 +198,6 @@ jobs:
             echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
           } > review_body.md
 
-          # 既存コメントを更新 or 新規作成
           if [ -n "$PREV_COMMENT_ID" ] && [ "$PREV_COMMENT_ID" != "null" ] && [ "$PREV_COMMENT_ID" != "" ]; then
             gh api repos/$REPO/issues/comments/$PREV_COMMENT_ID \
               --method PATCH \
@@ -204,62 +207,3 @@ jobs:
               --repo "$REPO" \
               --body-file review_body.md
           fi
-
-      - name: Post individual finding comments（個別指摘コメントを投稿）
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: |
-          REVIEW=$(cat review_output.txt)
-          IGNORE_LIST=$(cat ignore_list.txt)
-
-          # 現在のレビューに含まれるIDを抽出
-          CURRENT_IDS=$(echo "$REVIEW" | grep -oP '(Critical|Warning)-\d+' | sort -u)
-
-          # 既存の個別コメントをすべて取得
-          gh api repos/$REPO/issues/$PR_NUMBER/comments \
-            --paginate \
-            --jq '.[] | select(.body | test("<!-- claude-finding:")) | {id: .id, finding_id: (.body | capture("<!-- claude-finding:(?P<fid>[\\w-]+)-->").fid)}' \
-            | jq -s '.' > existing_finding_comments.json
-
-          # 不要なコメントを削除（現在の指摘にも除外リストにも含まれないもの）
-          jq -c '.[]' existing_finding_comments.json | while read -r row; do
-            COMMENT_ID=$(echo "$row" | jq -r '.id')
-            FINDING_ID=$(echo "$row" | jq -r '.finding_id')
-
-            IN_CURRENT=$(echo "$CURRENT_IDS" | grep -c "^${FINDING_ID}$" || true)
-            IN_IGNORE=$(echo "$IGNORE_LIST" | grep -c "${FINDING_ID}" || true)
-
-            if [ "$IN_CURRENT" -eq 0 ] && [ "$IN_IGNORE" -eq 0 ]; then
-              gh api repos/$REPO/issues/comments/$COMMENT_ID --method DELETE
-              echo "削除（解消済み）: $FINDING_ID"
-            fi
-          done
-
-          # 現在の指摘を個別コメントとして投稿 or 更新
-          echo "$REVIEW" | grep -oP '\*\*(Critical|Warning)-\d+\*\*[^\n]*' | while read -r line; do
-            FINDING_ID=$(echo "$line" | grep -oP '(Critical|Warning)-\d+')
-            [ -z "$FINDING_ID" ] && continue
-
-            EXISTING_ID=$(jq -r \
-              --arg fid "$FINDING_ID" \
-              '[.[] | select(.finding_id == $fid)] | first | .id // ""' \
-              existing_finding_comments.json)
-
-            CATEGORY=$(echo "$FINDING_ID" | grep -oP '^(Critical|Warning)')
-            EMOJI=$( [ "$CATEGORY" = "Critical" ] && echo "🔴" || echo "🟡" )
-
-            printf '<!-- claude-finding:%s-->\n%s **%s**\n\n%s\n\n> 👍 を押すと次回のレビューからこの指摘が除外されます' \
-              "$FINDING_ID" "$EMOJI" "$FINDING_ID" "$line" > /tmp/comment_body.md
-
-            if [ -z "$EXISTING_ID" ] || [ "$EXISTING_ID" = "null" ]; then
-              gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/comment_body.md
-              echo "新規作成: $FINDING_ID"
-            else
-              gh api repos/$REPO/issues/comments/$EXISTING_ID \
-                --method PATCH \
-                --field body="$(cat /tmp/comment_body.md)"
-              echo "更新: $FINDING_ID"
-            fi
-          done
