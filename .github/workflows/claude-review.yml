@@ -118,18 +118,25 @@ jobs:
               printf 'PRタイトル: %s\nPR説明: %s\n\n差分:\n```diff\n%s\n```\n' \
                 "$PR_TITLE" "$PR_BODY" "$DIFF"
             } > user_msg.txt
+            MESSAGES=$(jq -n --rawfile msg user_msg.txt '[{role:"user",content:$msg}]')
           else
             PROMPT_FILE=".github/followup-prompt.txt"
             MAX_TOKENS=2500
             EXISTING_BODY=$(awk 'p; /^---$/{p=1}' existing_review.md)
+            # マルチターン: 既存レビューをassistantメッセージに入れてClaudeに「自分が書いた」と認識させる
             {
               [ -n "$IGNORE_INSTR" ] && printf '%s\n\n' "$IGNORE_INSTR"
-              printf '以下の既存コメントをコピーして、新しいdiffに基づいて必要箇所だけ変更してください。\n\n'
-              printf '===既存コメント（ここからコピー）===\n'
-              printf '%s\n' "$EXISTING_BODY"
-              printf '===既存コメントここまで===\n\n'
-              printf '===新しいdiff===\n```diff\n%s\n```\n===diffここまで===\n' "$DIFF"
-            } > user_msg.txt
+              printf '上記のレビューコメントを以下のdiffに基づいて更新してください。\n修正済みの指摘には取り消し線を入れ、新しい問題があれば追加してください。\n\n```diff\n%s\n```\n' \
+                "$DIFF"
+            } > user_msg2.txt
+            MESSAGES=$(jq -n \
+              --arg existing "$EXISTING_BODY" \
+              --rawfile msg2 user_msg2.txt \
+              '[
+                {role:"user", content:"以下のコードレビューコメントを確認してください。"},
+                {role:"assistant", content:$existing},
+                {role:"user", content:$msg2}
+              ]')
           fi
 
           echo "=== DEBUG ==="
@@ -137,6 +144,10 @@ jobs:
           echo "EXISTING_BODY size: ${#EXISTING_BODY}"
           echo "DIFF size: ${#DIFF}"
           RESPONSE=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null) && echo "API ERROR: $RESPONSE" || true
+          if [ "$MODE" = "first" ]; then
+            MESSAGES=$(jq -n --rawfile msg user_msg.txt '[{role:"user",content:$msg}]')
+          fi
+
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
@@ -144,11 +155,11 @@ jobs:
             -H "content-type: application/json" \
             -d "$(jq -n \
               --rawfile sys "$PROMPT_FILE" \
-              --rawfile msg user_msg.txt \
+              --argjson messages "$MESSAGES" \
               --argjson tok "$MAX_TOKENS" \
               '{model:"claude-sonnet-4-6", max_tokens:$tok,
                 system:[{type:"text",text:$sys,cache_control:{type:"ephemeral"}}],
-                messages:[{role:"user",content:$msg}]}')")
+                messages:$messages}')")
 
           echo "$RESPONSE" | jq -r '.content[0].text // "エラー: レビュー取得失敗"' > review_output.txt
           echo "Claude response: $(wc -c < review_output.txt) bytes"
