@@ -100,7 +100,6 @@ jobs:
           IGNORE_LIST=$(cat ignore_list.txt)
           PR_BODY="${PR_BODY:-（説明なし）}"
 
-          DIFF_TRUNCATED=""
           if [ "$REVIEW_MODE" = "first" ]; then
             DIFF_LIMIT=10000
             MAX_TOKENS=3000
@@ -111,7 +110,6 @@ jobs:
 
           if [ ${#DIFF} -gt $DIFF_LIMIT ]; then
             DIFF="${DIFF:0:$DIFF_LIMIT}"$'\n\n[... diff が大きいため省略されました ...]'
-            DIFF_TRUNCATED="⚠️ **diff が大きいため一部省略されています。**"
           fi
 
           if [ -n "$IGNORE_LIST" ]; then
@@ -183,7 +181,6 @@ jobs:
               echo ""
               echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
               [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
-              [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
               echo ""
               echo "---"
               echo ""
@@ -204,7 +201,6 @@ jobs:
               echo ""
               echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
               [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
-              [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
               echo ""
               echo "---"
               echo ""
