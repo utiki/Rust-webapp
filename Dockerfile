@@ -31,7 +31,7 @@ RUN curl -L \
     rm -f /tmp/cargo-leptos.tar.gz
 
 # wasm-bindgen-cli をインストール
-RUN cargo install wasm-bindgen-cli@0.2.122
+RUN cargo install wasm-bindgen-cli@0.2.106
 
 WORKDIR /app
 
