@@ -41,16 +41,17 @@ jobs:
             BASE=$(echo "$PR_INFO" | jq -r '.base.ref')
             HEAD=$(echo "$PR_INFO" | jq -r '.head.ref')
             git fetch origin "$BASE" "$HEAD" 2>/dev/null || true
-            git diff origin/$BASE...origin/$HEAD \
-              -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
-              > pr.diff
           else
             PR_NUMBER=${{ github.event.pull_request.number }}
-            git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} \
-              -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
-              > pr.diff
+            BASE=${{ github.base_ref }}
+            HEAD=${{ github.head_ref }}
           fi
           echo "$PR_NUMBER" > pr_number.txt
+
+          # *.lock, minified, 生成物を除外してdiff取得
+          git diff origin/$BASE...origin/$HEAD \
+            -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+            > pr.diff
           echo "diff size: $(wc -c < pr.diff) bytes"
 
       - name: Collect ignore list
@@ -59,40 +60,48 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           PR_NUMBER=$(cat pr_number.txt)
-
-          # /claude-ignore 1,2,4 形式のコメントから番号を収集
           IGNORE_LIST=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
             --paginate \
             --jq '[.[] | select(.body | test("^/claude-ignore\\s")) | .body] | join("\n")' \
             | grep -oP '(?<=/claude-ignore\s)[\d,\s]+' \
-            | tr -d ' ' \
-            | tr ',' '\n' \
-            | grep -E '^[0-9]+$' \
-            | sort -nu \
+            | tr -d ' ' | tr ',' '\n' \
+            | grep -E '^[0-9]+$' | sort -nu \
             | paste -sd ',' -)
-
           echo "除外番号: $IGNORE_LIST"
           echo "$IGNORE_LIST" > ignore_list.txt
 
-      - name: Get previous Claude review
+      - name: Get review history
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           PR_NUMBER=$(cat pr_number.txt)
 
-          COMMENT_JSON=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
+          # 初回レビューコメントを取得（<!-- claude-first-review --> マーカー付き）
+          FIRST_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
+            --jq '[.[] | select(.body | contains("<!-- claude-first-review -->"))] | first // {}')
+          FIRST_REVIEW=$(echo "$FIRST_COMMENT" | jq -r '.body // ""')
+
+          # 最新のレビューコメントを取得
+          LATEST_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
             --jq '[.[] | select(.body | startswith("## 🤖 Claude Code Review"))] | last // {}')
+          LATEST_COMMENT_ID=$(echo "$LATEST_COMMENT" | jq -r '.id // ""')
 
-          PREV_COMMENT_ID=$(echo "$COMMENT_JSON" | jq -r '.id // ""')
-          PREV_REVIEW=$(echo "$COMMENT_JSON" | jq -r '.body // ""')
-
-          if [ ${#PREV_REVIEW} -gt 1500 ]; then
-            PREV_REVIEW="${PREV_REVIEW:0:1500}"$'\n[... 前回レビューの一部を省略 ...]'
+          # 初回かどうか判定
+          if [ -z "$FIRST_REVIEW" ]; then
+            echo "true" > is_first_review.txt
+            echo "初回レビューです"
+          else
+            echo "false" > is_first_review.txt
+            echo "2回目以降のレビューです"
+            # 初回レビューを3000文字に制限
+            if [ ${#FIRST_REVIEW} -gt 3000 ]; then
+              FIRST_REVIEW="${FIRST_REVIEW:0:3000}"$'\n[... 初回レビューの一部を省略 ...]'
+            fi
           fi
 
-          echo "$PREV_COMMENT_ID" > prev_comment_id.txt
-          echo "$PREV_REVIEW" > prev_review.md
+          echo "$FIRST_REVIEW" > first_review.md
+          echo "$LATEST_COMMENT_ID" > latest_comment_id.txt
 
       - name: Claude Review
         env:
@@ -104,30 +113,40 @@ jobs:
         run: |
           PR_NUMBER=$(cat pr_number.txt)
           DIFF=$(cat pr.diff)
-          PREV_REVIEW=$(cat prev_review.md)
-          PREV_COMMENT_ID=$(cat prev_comment_id.txt)
+          FIRST_REVIEW=$(cat first_review.md)
+          LATEST_COMMENT_ID=$(cat latest_comment_id.txt)
           IGNORE_LIST=$(cat ignore_list.txt)
+          IS_FIRST=$(cat is_first_review.txt)
           PR_BODY="${PR_BODY:-（説明なし）}"
 
-          # diffが大きすぎる場合は省略
+          # 初回と2回目以降でトークン上限を切り替え
+          if [ "$IS_FIRST" = "true" ]; then
+            DIFF_LIMIT=10000
+            MAX_TOKENS=3000
+          else
+            DIFF_LIMIT=5000
+            MAX_TOKENS=1500
+          fi
+
+          # diffの省略
           DIFF_TRUNCATED=""
-          if [ ${#DIFF} -gt 5000 ]; then
-            DIFF="${DIFF:0:5000}"$'\n\n[... diff が大きいため省略されました ...]'
+          if [ ${#DIFF} -gt $DIFF_LIMIT ]; then
+            DIFF="${DIFF:0:$DIFF_LIMIT}"$'\n\n[... diff が大きいため省略されました ...]'
             DIFF_TRUNCATED="⚠️ **diff が大きいため一部省略されています。**"
           fi
 
           # 除外指示
           if [ -n "$IGNORE_LIST" ]; then
-            IGNORE_INSTRUCTION="## 除外指定\n以下のIDの指摘は出力しないでください: ${IGNORE_LIST}\n\n"
+            IGNORE_INSTRUCTION="## 除外指定\n以下の番号の指摘は出力しないでください: ${IGNORE_LIST}\n\n"
           else
             IGNORE_INSTRUCTION=""
           fi
 
-          # 前回レビューとの比較
-          if [ -n "$PREV_REVIEW" ] && [ "$PREV_REVIEW" != "null" ]; then
-            COMPARE_INSTRUCTION="## 前回レビューとの比較\n\n### ✅ 前回から修正された箇所\n### ❌ 未修正の箇所\n\n前回のレビュー内容:\n${PREV_REVIEW}\n\n---\n"
-          else
+          # 初回 or 2回目以降で比較指示を切り替え
+          if [ "$IS_FIRST" = "true" ]; then
             COMPARE_INSTRUCTION=""
+          else
+            COMPARE_INSTRUCTION="## 初回レビューとの比較\n以下の初回レビューと今回の差分を照合してください。\n\n### ✅ 初回から修正された箇所\n### ❌ 未修正の箇所\n\n初回レビュー内容:\n${FIRST_REVIEW}\n\n---\n"
           fi
 
           # APIリトライ（最大3回）
@@ -147,12 +166,13 @@ jobs:
                 --arg body "$PR_BODY" \
                 --arg compare "$COMPARE_INSTRUCTION" \
                 --arg ignore "$IGNORE_INSTRUCTION" \
+                --argjson max_tokens "$MAX_TOKENS" \
                 '{
                   model: "claude-sonnet-4-6",
-                  max_tokens: 1500,
+                  max_tokens: $max_tokens,
                   system: [{
                     type: "text",
-                    text: "あなたはシニアエンジニアとしてコードレビューをします。\n\n各指摘には全カテゴリを通じた通し番号を付けてください（1, 2, 3, 4...）。\n\nレビュー結果は以下の形式で日本語のMarkdownで出力してください。\n\n## 📊 サマリー\n| カテゴリ | 件数 | 状態 |\n|---|---|---|\n| 🔴 Critical | N件 | マージ不可 or ✅ なし |\n| 🟡 Warning | N件 | 要検討 or ✅ なし |\n| 🟢 Good | N件 | - |\n\nCriticalが0件なら「✅ マージ可能」と追記する。\n\n<details>\n<summary>🔴 Critical（要修正）N件</summary>\n\nバグ・セキュリティ脆弱性など必ず修正が必要な問題。\n\n**1** `ファイル名:行番号`\n> 理由の説明\n\n</details>\n\n<details>\n<summary>🟡 Warning（要検討）N件</summary>\n\nパフォーマンス・保守性など修正を推奨する問題。\n\n**2** `ファイル名:行番号`\n> 理由の説明\n\n</details>\n\n<details>\n<summary>🟢 Good（良い点）N件</summary>\n\n**3** 優れた実装の説明\n\n</details>\n\n## 出力ルール\n- 番号は全指摘を通じて1から連番にする（カテゴリをまたいで続く）\n- 各 details の summary にはカテゴリ名と件数を入れる\n- 該当なしのカテゴリも details は出力し「なし」と書く\n- 除外指定された番号の指摘は絶対に出力しない\n- 比較セクションがあれば必ず前回との差分を出力する",
+                    text: "あなたはシニアエンジニアとしてコードレビューをします。\n\n全指摘に通し番号（1, 2, 3...）を付けてください。\n\nレビュー結果は以下の形式で日本語のMarkdownで出力してください。\n\n## 📊 サマリー\n| カテゴリ | 件数 | 状態 |\n|---|---|---|\n| 🔴 Critical | N件 | マージ不可 or ✅ なし |\n| 🟡 Warning | N件 | 要検討 or ✅ なし |\n| 🟢 Good | N件 | - |\n\nCriticalが0件なら最後に「✅ マージ可能」と書く。\n\n<details>\n<summary>🔴 Critical（要修正）N件</summary>\n\n---\n\n**[1]** 📄 `ファイル名:行番号`\n\n問題の説明（具体的に何が問題か、なぜ問題か、どう修正するか）\n\n---\n\n</details>\n\n<details>\n<summary>🟡 Warning（要検討）N件</summary>\n\n---\n\n**[2]** 📄 `ファイル名:行番号`\n\n問題の説明と改善提案\n\n---\n\n</details>\n\n<details>\n<summary>🟢 Good（良い点）N件</summary>\n\n---\n\n**[3]** 良い点の説明\n\n---\n\n</details>\n\n## 出力ルール\n- 各指摘は `---` で区切る\n- 該当なしのカテゴリも details を出力し「なし」と書く\n- 除外指定された番号は絶対に出力しない\n- 比較セクションがあれば必ず前回との差分を出力する",
                     cache_control: {type: "ephemeral"}
                   }],
                   messages: [{
@@ -182,8 +202,16 @@ jobs:
             IGNORE_NOTICE=""
           fi
 
+          # 初回レビューにはマーカーを付けて保存
+          if [ "$IS_FIRST" = "true" ]; then
+            REVIEW_LABEL="<!-- claude-first-review -->"
+          else
+            REVIEW_LABEL=""
+          fi
+
           {
             echo "## 🤖 Claude Code Review"
+            [ -n "$REVIEW_LABEL" ] && echo "$REVIEW_LABEL"
             echo ""
             echo "> **重大度**: 🔴 Critical（要修正）　🟡 Warning（要検討）　🟢 Good（良い点）"
             echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
@@ -195,11 +223,16 @@ jobs:
             echo "$REVIEW"
             echo ""
             echo "---"
-            echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
+            if [ "$IS_FIRST" = "true" ]; then
+              echo "*Powered by Claude Sonnet 4.6 — 初回レビュー。次回以降は本レビューを基準に差分を確認します。*"
+            else
+              echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
+            fi
           } > review_body.md
 
-          if [ -n "$PREV_COMMENT_ID" ] && [ "$PREV_COMMENT_ID" != "null" ] && [ "$PREV_COMMENT_ID" != "" ]; then
-            gh api repos/$REPO/issues/comments/$PREV_COMMENT_ID \
+          # 既存コメントを更新 or 新規作成
+          if [ -n "$LATEST_COMMENT_ID" ] && [ "$LATEST_COMMENT_ID" != "null" ] && [ "$LATEST_COMMENT_ID" != "" ]; then
+            gh api repos/$REPO/issues/comments/$LATEST_COMMENT_ID \
               --method PATCH \
               --field body="$(cat review_body.md)"
           else
