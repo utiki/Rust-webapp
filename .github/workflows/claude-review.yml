@@ -113,7 +113,7 @@ jobs:
             if [ ${#EXISTING_REVIEW} -gt 4000 ]; then
               EXISTING_REVIEW="${EXISTING_REVIEW:0:4000}"$'\n[... 省略 ...]'
             fi
-            EXISTING_INSTRUCTION="## 既存のレビューコメント\n以下の既存コメントを更新してください。修正済みの指摘は「修正済み」セクションに移動し、新しい指摘は該当カテゴリに追加してください。\n\n${EXISTING_REVIEW}\n\n---\n"
+            EXISTING_INSTRUCTION="以下の既存レビューコメントを更新してください。各指摘をdiffと照合し、修正済みかどうか判断してコメントを再構成してください。\n\n=== 既存のレビューコメント ===\n${EXISTING_REVIEW}\n=== ここまで ===\n\n"
           fi
 
           DIFF_TRUNCATED=""
