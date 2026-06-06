@@ -124,8 +124,11 @@ jobs:
             EXISTING_BODY=$(awk 'p; /^---$/{p=1}' existing_review.md)
             {
               [ -n "$IGNORE_INSTR" ] && printf '%s\n\n' "$IGNORE_INSTR"
-              printf '## 既存のレビューコメント\n\n%s\n\n## 新しいdiff\n\n```diff\n%s\n```\n' \
-                "$EXISTING_BODY" "$DIFF"
+              printf '以下の既存コメントをコピーして、新しいdiffに基づいて必要箇所だけ変更してください。\n\n'
+              printf '===既存コメント（ここからコピー）===\n'
+              printf '%s\n' "$EXISTING_BODY"
+              printf '===既存コメントここまで===\n\n'
+              printf '===新しいdiff===\n```diff\n%s\n```\n===diffここまで===\n' "$DIFF"
             } > user_msg.txt
           fi
 
