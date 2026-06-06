@@ -1,0 +1,75 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize  # 追加コミット時も再レビュー
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR diff
+        id: diff
+        run: |
+          # diffを取得してファイルに保存（文字数制限対策）
+          git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr.diff
+          echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
+
+      - name: Claude Review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          DIFF=$(cat pr.diff)
+
+          # diffが大きすぎる場合は先頭10000文字に制限
+          if [ ${#DIFF} -gt 10000 ]; then
+            DIFF="${DIFF:0:10000}"$'\n\n[... diff が大きいため省略されました ...]'
+          fi
+
+          # Claude API にレビューを依頼
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -n \
+              --arg diff "$DIFF" \
+              --arg title "$PR_TITLE" \
+              --arg body "$PR_BODY" \
+              '{
+                model: "claude-sonnet-4-20250514",
+                max_tokens: 2048,
+                messages: [{
+                  role: "user",
+                  content: ("あなたはシニアエンジニアとしてコードレビューをしてください。\n\n## PRタイトル\n" + $title + "\n\n## PR説明\n" + $body + "\n\n## 差分\n```diff\n" + $diff + "\n```\n\n以下の観点でレビューし、日本語でMarkdown形式にまとめてください。\n- バグや論理的な問題\n- セキュリティ上の懸念\n- パフォーマンスの問題\n- コードの可読性・保守性\n- 良い点\n\n問題がなければ「✅ 問題なし」と一言で返してください。")
+                }]
+              }'
+            )")
+
+          # レスポンスからテキストを抽出
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "レビューの取得に失敗しました"')
+
+          # PRにコメントを投稿
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "## 🤖 Claude Code Review
+
+          $REVIEW
+
+          ---
+          *このレビューはClaude ( claude-sonnet-4-20250514 ) によって自動生成されました*"
