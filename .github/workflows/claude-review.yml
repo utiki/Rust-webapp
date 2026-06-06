@@ -48,9 +48,9 @@ jobs:
           fi
           echo "$PR_NUMBER" > pr_number.txt
 
-          # *.lock, minified, 生成物を除外してdiff取得
-          git diff origin/$BASE...origin/$HEAD \
-            -- ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
+          # .github/ *.lock minified 生成物を除外してdiff取得
+          git diff "origin/$BASE"..."origin/$HEAD" \
+            -- ':!.github/*' ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
             > pr.diff
           echo "diff size: $(wc -c < pr.diff) bytes"
 
@@ -77,23 +77,23 @@ jobs:
         run: |
           PR_NUMBER=$(cat pr_number.txt)
 
-          # 初回レビューコメントを取得（<!-- claude-first-review --> マーカー付き）
+          # 初回レビューコメントを取得（<!-- claude-first-review --> マーカー）
           FIRST_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
             --jq '[.[] | select(.body | contains("<!-- claude-first-review -->"))] | first // {}')
           FIRST_REVIEW=$(echo "$FIRST_COMMENT" | jq -r '.body // ""')
 
-          # 最新のレビューコメントを取得
-          LATEST_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
-            --jq '[.[] | select(.body | startswith("## 🤖 Claude Code Review"))] | last // {}')
-          LATEST_COMMENT_ID=$(echo "$LATEST_COMMENT" | jq -r '.id // ""')
+          # フォローアップレビューコメントを取得（<!-- claude-followup-review --> マーカー）
+          FOLLOWUP_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
+            --jq '[.[] | select(.body | contains("<!-- claude-followup-review -->"))] | first // {}')
+          FOLLOWUP_COMMENT_ID=$(echo "$FOLLOWUP_COMMENT" | jq -r '.id // ""')
 
           # 初回かどうか判定
           if [ -z "$FIRST_REVIEW" ]; then
-            echo "true" > is_first_review.txt
+            echo "first" > review_mode.txt
             echo "初回レビューです"
           else
-            echo "false" > is_first_review.txt
-            echo "2回目以降のレビューです"
+            echo "followup" > review_mode.txt
+            echo "フォローアップレビューです"
             # 初回レビューを3000文字に制限
             if [ ${#FIRST_REVIEW} -gt 3000 ]; then
               FIRST_REVIEW="${FIRST_REVIEW:0:3000}"$'\n[... 初回レビューの一部を省略 ...]'
@@ -101,7 +101,7 @@ jobs:
           fi
 
           echo "$FIRST_REVIEW" > first_review.md
-          echo "$LATEST_COMMENT_ID" > latest_comment_id.txt
+          echo "$FOLLOWUP_COMMENT_ID" > followup_comment_id.txt
 
       - name: Claude Review
         env:
@@ -114,13 +114,13 @@ jobs:
           PR_NUMBER=$(cat pr_number.txt)
           DIFF=$(cat pr.diff)
           FIRST_REVIEW=$(cat first_review.md)
-          LATEST_COMMENT_ID=$(cat latest_comment_id.txt)
+          FOLLOWUP_COMMENT_ID=$(cat followup_comment_id.txt)
           IGNORE_LIST=$(cat ignore_list.txt)
-          IS_FIRST=$(cat is_first_review.txt)
+          REVIEW_MODE=$(cat review_mode.txt)
           PR_BODY="${PR_BODY:-（説明なし）}"
 
-          # 初回と2回目以降でトークン上限を切り替え
-          if [ "$IS_FIRST" = "true" ]; then
+          # 初回は高めのトークン上限、フォローアップは低め
+          if [ "$REVIEW_MODE" = "first" ]; then
             DIFF_LIMIT=10000
             MAX_TOKENS=3000
           else
@@ -142,14 +142,12 @@ jobs:
             IGNORE_INSTRUCTION=""
           fi
 
-          # 初回 or 2回目以降で比較指示を切り替え
-          if [ "$IS_FIRST" = "true" ]; then
+          # 初回 or フォローアップで比較指示を切り替え
+          if [ "$REVIEW_MODE" = "first" ]; then
             COMPARE_INSTRUCTION=""
           else
-            COMPARE_INSTRUCTION="## 初回レビューとの比較\n以下の初回レビューと今回の差分を照合してください。\n\n### ✅ 初回から修正された箇所\n### ❌ 未修正の箇所\n\n初回レビュー内容:\n${FIRST_REVIEW}\n\n---\n"
+            COMPARE_INSTRUCTION="## 初回レビューとの比較\n以下の初回レビューと今回の差分を照合し、修正状況を出力してください。\n\n### ✅ 初回から修正された箇所\n### ❌ 未修正の箇所\n\n初回レビュー内容:\n${FIRST_REVIEW}\n\n---\n"
           fi
-
-          # システムプロンプトはリポジトリの .github/review-prompt.txt から読み込む
 
           # APIリトライ（最大3回）
           MAX_RETRY=3
@@ -205,19 +203,19 @@ jobs:
             IGNORE_NOTICE=""
           fi
 
-          # 初回レビューにはマーカーを付けて保存
-          if [ "$IS_FIRST" = "true" ]; then
-            REVIEW_LABEL="<!-- claude-first-review -->"
-          else
-            REVIEW_LABEL=""
-          fi
-
           {
-            echo "## 🤖 Claude Code Review"
-            [ -n "$REVIEW_LABEL" ] && echo "$REVIEW_LABEL"
-            echo ""
-            echo "> **重大度**: 🔴 Critical（要修正）　🟡 Warning（要検討）　🟢 Good（良い点）"
-            echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
+            if [ "$REVIEW_MODE" = "first" ]; then
+              echo "## 🤖 Claude Code Review — 初回レビュー"
+              echo "<!-- claude-first-review -->"
+              echo ""
+              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
+              echo "> 次回コミット時に修正状況を別コメントで確認します。"
+            else
+              echo "## 🤖 Claude Code Review — フォローアップ"
+              echo "<!-- claude-followup-review -->"
+              echo ""
+              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
+            fi
             [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
             [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
             echo ""
@@ -226,20 +224,28 @@ jobs:
             echo "$REVIEW"
             echo ""
             echo "---"
-            if [ "$IS_FIRST" = "true" ]; then
-              echo "*Powered by Claude Sonnet 4.6 — 初回レビュー。次回以降は本レビューを基準に差分を確認します。*"
-            else
-              echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
-            fi
+            echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
           } > review_body.md
 
-          # 既存コメントを更新 or 新規作成
-          if [ -n "$LATEST_COMMENT_ID" ] && [ "$LATEST_COMMENT_ID" != "null" ] && [ "$LATEST_COMMENT_ID" != "" ]; then
-            gh api repos/$REPO/issues/comments/$LATEST_COMMENT_ID \
-              --method PATCH \
-              --field body="$(cat review_body.md)"
-          else
+          # コメント投稿ロジック
+          if [ "$REVIEW_MODE" = "first" ]; then
+            # 初回: 必ず新規コメントを作成
             gh pr comment "$PR_NUMBER" \
               --repo "$REPO" \
               --body-file review_body.md
+            echo "初回レビューコメントを作成しました"
+
+          elif [ -n "$FOLLOWUP_COMMENT_ID" ] && [ "$FOLLOWUP_COMMENT_ID" != "null" ]; then
+            # 3回目以降: フォローアップコメントを更新
+            gh api repos/$REPO/issues/comments/$FOLLOWUP_COMMENT_ID \
+              --method PATCH \
+              --field body="$(cat review_body.md)"
+            echo "フォローアップコメントを更新しました: $FOLLOWUP_COMMENT_ID"
+
+          else
+            # 2回目: フォローアップコメントを新規作成
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
+              --body-file review_body.md
+            echo "フォローアップコメントを作成しました"
           fi

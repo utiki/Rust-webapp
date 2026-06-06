@@ -50,11 +50,11 @@ Criticalが0件なら最後に「✅ マージ可能」と書く。
 
 **修正前:**
 ```rust
-let value = some_result.unwrap();
+42 | let value = some_result.unwrap();
 ```
 **修正後:**
 ```rust
-let value = some_result?;
+42 | let value = some_result?;
 ```
 
 > [!WARNING]
@@ -65,11 +65,11 @@ let value = some_result?;
 
 **修正前:**
 ```rust
-let conn = db.connect();
+15 | let conn = db.connect();
 ```
 **修正後:**
 ```rust
-let conn = pool.get().await?;
+15 | let conn = pool.get().await?;
 ```
 
 > [!NOTE]
@@ -80,11 +80,11 @@ let conn = pool.get().await?;
 
 **修正前:**
 ```rust
-let x = get_count();
+10 | let x = get_count();
 ```
 **修正後:**
 ```rust
-let user_count = get_count();
+10 | let user_count = get_count();
 ```
 
 > [!TIP]
@@ -103,6 +103,8 @@ let user_count = get_count();
   4. 「修正後:」コードブロック（具体的な修正例）
 - Suggestionは修正前/後ではなく「提案:」として提案内容を書く
 - コードブロックには必ず言語名を付ける（```rust, ```python, ```js など）
+- 修正前・修正後のコードブロックには各行の先頭に行番号を付ける（例: `10 | let x = foo.unwrap();`）
+- 行番号は差分から実際の行番号を使う
 - 変更されていないファイルや削除されたファイルは指摘しない
 - details タグや区切り線（---）は使わない
 - 除外指定された番号は絶対に出力しない
