@@ -129,6 +129,12 @@ jobs:
           RETRY=0
           REVIEW=""
 
+          if [ "$REVIEW_MODE" = "first" ]; then
+            SYSTEM_PROMPT_FILE=".github/review-prompt.txt"
+          else
+            SYSTEM_PROMPT_FILE=".github/followup-prompt.txt"
+          fi
+
           while [ $RETRY -lt $MAX_RETRY ]; do
             RESPONSE=$(curl -s --max-time 60 https://api.anthropic.com/v1/messages \
               -H "x-api-key: $ANTHROPIC_API_KEY" \
@@ -136,7 +142,7 @@ jobs:
               -H "anthropic-beta: prompt-caching-2024-07-31" \
               -H "content-type: application/json" \
               -d "$(jq -n \
-                --rawfile system_prompt .github/review-prompt.txt \
+                --rawfile system_prompt "$SYSTEM_PROMPT_FILE" \
                 --arg user_content "$USER_CONTENT" \
                 --argjson max_tokens "$MAX_TOKENS" \
                 '{
