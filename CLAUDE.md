@@ -16,18 +16,6 @@
 
 ---
 
-## 🐍 Python
-
-- Python 3.11+
-- Formatter: `ruff format`、Linter: `ruff check`、型チェック: `mypy --strict`
-- 型アノテーションを必ずつける（`X | None` 記法を使う）
-- `dataclass` または `pydantic.BaseModel` でデータ構造を定義する
-- 例外は具体的な型で捕捉する（`except Exception` は原則禁止）
-- パッケージ管理は `uv`、依存関係は `pyproject.toml` で管理
-- テストは `pytest`、カバレッジ80%以上を目標
-
----
-
 ## 🌐 JavaScript / HTML / CSS
 
 - JavaScript: ES2022+（`import/export` を使用）
