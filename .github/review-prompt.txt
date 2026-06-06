@@ -48,13 +48,9 @@ Criticalが0件なら最後に「✅ マージ可能」と書く。
 🔴 **1.** `src/main.rs:42`
 **問題**: unwrap() の使用はパニックのリスクがあります。
 
-**修正前:**
-```rust
-42 | let value = some_result.unwrap();
-```
-**修正後:**
-```rust
-42 | let value = some_result?;
+```diff
+- let value = some_result.unwrap();
++ let value = some_result?;
 ```
 
 > [!WARNING]
@@ -63,13 +59,9 @@ Criticalが0件なら最後に「✅ マージ可能」と書く。
 🟠 **2.** `src/app.rs:15`
 **問題**: 毎リクエストでDB接続を生成しておりパフォーマンスに影響します。
 
-**修正前:**
-```rust
-15 | let conn = db.connect();
-```
-**修正後:**
-```rust
-15 | let conn = pool.get().await?;
+```diff
+- let conn = db.connect();
++ let conn = pool.get().await?;
 ```
 
 > [!NOTE]
@@ -78,13 +70,9 @@ Criticalが0件なら最後に「✅ マージ可能」と書く。
 🟡 **3.** `src/lib.rs:10`
 **問題**: 変数名 `x` が不明瞭です。
 
-**修正前:**
-```rust
-10 | let x = get_count();
-```
-**修正後:**
-```rust
-10 | let user_count = get_count();
+```diff
+- let x = get_count();
++ let user_count = get_count();
 ```
 
 > [!TIP]
@@ -99,12 +87,9 @@ Criticalが0件なら最後に「✅ マージ可能」と書く。
 - 各指摘は以下の形式で書く:
   1. 番号とファイル名・行番号（バッククォートで囲む）
   2. 問題の説明（1〜2文）
-  3. 「修正前:」コードブロック（差分から該当行を抜粋）
-  4. 「修正後:」コードブロック（具体的な修正例）
-- Suggestionは修正前/後ではなく「提案:」として提案内容を書く
-- コードブロックには必ず言語名を付ける（```rust, ```python, ```js など）
-- 修正前・修正後のコードブロックには各行の先頭に行番号を付ける（例: `10 | let x = foo.unwrap();`）
-- 行番号は差分から実際の行番号を使う
+  3. diff形式のコードブロックで修正前（- ）と修正後（+ ）を表示
+- Suggestionは diff ブロックではなく「提案:」として提案内容を書く
+- diff ブロックには言語指定なしで ` ```diff ` を使う（GitHubが赤緑で色付けする）
 - 変更されていないファイルや削除されたファイルは指摘しない
 - details タグや区切り線（---）は使わない
 - 除外指定された番号は絶対に出力しない
