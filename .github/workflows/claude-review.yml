@@ -122,11 +122,11 @@ jobs:
           else
             PROMPT_FILE=".github/followup-prompt.txt"
             MAX_TOKENS=2500
-            EXISTING_BODY=$(awk 'p; /^---$/{p=1}' existing_review.md)
+            EXISTING_BODY=$(awk 'p; /^---$/{p=1}' existing_review.md | sed '/<\/details>/d')
             # マルチターン: 既存レビューをassistantメッセージに入れてClaudeに「自分が書いた」と認識させる
             {
               [ -n "$IGNORE_INSTR" ] && printf '%s\n\n' "$IGNORE_INSTR"
-              printf '上記のレビューコメントを以下のdiffに基づいて更新してください。\n修正済みの指摘には取り消し線を入れ、新しい問題があれば追加してください。\n\n```diff\n%s\n```\n' \
+              printf '上記のレビューコメントを以下のdiffに基づいて更新してください。\n\n取り消し線のルール（厳格に適用）:\n- diffの `-` 行に指摘された具体的なコードが完全に含まれている場合のみ取り消し線を入れる\n- 少しでも迷った場合は取り消し線を入れない\n- 関係のない指摘には絶対に触らない\n\n```diff\n%s\n```\n' \
                 "$DIFF"
             } > user_msg2.txt
             MESSAGES=$(jq -n \
@@ -177,9 +177,16 @@ jobs:
           COMMENT_ID=$(cat comment_id.txt)
           IGNORE_LIST=$(cat ignore_list.txt)
 
+          # サマリー件数を抽出してsummary行を作成
+          C=$(grep -oP '🔴 Critical \| \K\d+' review_output.txt 2>/dev/null || echo "?")
+          MA=$(grep -oP '🟠 Major \| \K\d+' review_output.txt 2>/dev/null || echo "?")
+          MI=$(grep -oP '🟡 Minor \| \K\d+' review_output.txt 2>/dev/null || echo "?")
+          S=$(grep -oP '🟢 Suggestion \| \K\d+' review_output.txt 2>/dev/null || echo "?")
+
           {
-            echo "## 🤖 Claude Code Review"
             echo "<!-- claude-review -->"
+            echo "<details>"
+            printf '<summary>🤖 Claude Code Review — 🔴 Critical: %s件 | 🟠 Major: %s件 | 🟡 Minor: %s件 | 🟢 Suggestion: %s件</summary>\n' "$C" "$MA" "$MI" "$S"
             echo ""
             echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
             if [ -n "$IGNORE_LIST" ]; then
@@ -190,6 +197,8 @@ jobs:
             echo "---"
             echo ""
             cat review_output.txt
+            echo ""
+            echo "</details>"
           } > post_body.md
 
           if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
