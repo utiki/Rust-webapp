@@ -5,6 +5,9 @@ on:
     types:
       - opened
       - synchronize  # 追加コミット時も再レビュー
+    branches:
+      - main
+      - develop
 
 jobs:
   review:
@@ -22,7 +25,6 @@ jobs:
       - name: Get PR diff
         id: diff
         run: |
-          # diffを取得してファイルに保存（文字数制限対策）
           git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} > pr.diff
           echo "diff_size=$(wc -c < pr.diff)" >> $GITHUB_OUTPUT
 
@@ -64,12 +66,17 @@ jobs:
           # レスポンスからテキストを抽出
           REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "レビューの取得に失敗しました"')
 
-          # PRにコメントを投稿
+          # レビュー内容をファイルに書き出す（特殊文字の影響を回避）
+          {
+            echo "## 🤖 Claude Code Review"
+            echo ""
+            echo "$REVIEW"
+            echo ""
+            echo "---"
+            echo "*このレビューは Claude ( claude-sonnet-4-20250514 ) によって自動生成されました*"
+          } > review_body.md
+
+          # ファイルを使ってPRにコメントを投稿
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO" \
-            --body "## 🤖 Claude Code Review
-
-          $REVIEW
-
-          ---
-          *このレビューはClaude ( claude-sonnet-4-20250514 ) によって自動生成されました*"
+            --body-file review_body.md
