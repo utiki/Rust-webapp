@@ -113,12 +113,20 @@ jobs:
           if [ "$MODE" = "first" ]; then
             PROMPT_FILE=".github/review-prompt.txt"
             MAX_TOKENS=3000
-            USER_MSG="${IGNORE_INSTR}PRタイトル: ${PR_TITLE}\nPR説明: ${PR_BODY}\n\n差分:\n\`\`\`diff\n${DIFF}\n\`\`\`"
+            {
+              [ -n "$IGNORE_INSTR" ] && printf '%s\n\n' "$IGNORE_INSTR"
+              printf 'PRタイトル: %s\nPR説明: %s\n\n差分:\n```diff\n%s\n```\n' \
+                "$PR_TITLE" "$PR_BODY" "$DIFF"
+            } > user_msg.txt
           else
             PROMPT_FILE=".github/followup-prompt.txt"
             MAX_TOKENS=2500
             EXISTING_BODY=$(awk 'p; /^---$/{p=1}' existing_review.md)
-            USER_MSG="${IGNORE_INSTR}## 既存のレビューコメント\n${EXISTING_BODY}\n\n## 新しいdiff\n\`\`\`diff\n${DIFF}\n\`\`\`"
+            {
+              [ -n "$IGNORE_INSTR" ] && printf '%s\n\n' "$IGNORE_INSTR"
+              printf '## 既存のレビューコメント\n\n%s\n\n## 新しいdiff\n\n```diff\n%s\n```\n' \
+                "$EXISTING_BODY" "$DIFF"
+            } > user_msg.txt
           fi
 
           echo "=== DEBUG ==="
@@ -133,7 +141,7 @@ jobs:
             -H "content-type: application/json" \
             -d "$(jq -n \
               --rawfile sys "$PROMPT_FILE" \
-              --arg msg "$USER_MSG" \
+              --rawfile msg user_msg.txt \
               --argjson tok "$MAX_TOKENS" \
               '{model:"claude-sonnet-4-6", max_tokens:$tok,
                 system:[{type:"text",text:$sys,cache_control:{type:"ephemeral"}}],
