@@ -42,6 +42,7 @@ jobs:
             HEAD=${{ github.head_ref }}
           fi
           echo "$PR_NUMBER" > pr_number.txt
+
           git diff "origin/$BASE"..."origin/$HEAD" \
             -- ':!.github/*' ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
             > pr.diff
@@ -62,36 +63,25 @@ jobs:
             | paste -sd ',' -)
           echo "$IGNORE_LIST" > ignore_list.txt
 
-      - name: Get review history
+      - name: Get existing review comment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           PR_NUMBER=$(cat pr_number.txt)
 
-          FIRST_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
-            --jq '[.[] | select(.body | contains("<!-- claude-first-review -->"))] | first // {}')
-          FIRST_COMMENT_ID=$(echo "$FIRST_COMMENT" | jq -r '.id // ""')
-          FIRST_REVIEW=$(echo "$FIRST_COMMENT" | jq -r '.body // ""')
+          REVIEW_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
+            --jq '[.[] | select(.body | contains("<!-- claude-review -->"))] | first // {}')
+          REVIEW_COMMENT_ID=$(echo "$REVIEW_COMMENT" | jq -r '.id // ""')
+          EXISTING_REVIEW=$(echo "$REVIEW_COMMENT" | jq -r '.body // ""')
 
-          FOLLOWUP_COMMENT=$(gh api repos/$REPO/issues/$PR_NUMBER/comments \
-            --jq '[.[] | select(.body | contains("<!-- claude-followup-review -->"))] | first // {}')
-          FOLLOWUP_COMMENT_ID=$(echo "$FOLLOWUP_COMMENT" | jq -r '.id // ""')
-
-          if [ -z "$FIRST_REVIEW" ]; then
-            echo "first" > review_mode.txt
+          echo "$REVIEW_COMMENT_ID" > review_comment_id.txt
+          echo "$EXISTING_REVIEW" > existing_review.md
+          if [ -z "$EXISTING_REVIEW" ]; then
+            echo "初回レビューです"
           else
-            echo "followup" > review_mode.txt
-            if [ ${#FIRST_REVIEW} -gt 3000 ]; then
-              echo "${FIRST_REVIEW:0:3000}"$'\n[... 省略 ...]' > first_review_for_api.md
-            else
-              echo "$FIRST_REVIEW" > first_review_for_api.md
-            fi
+            echo "既存コメントを更新します（ID: $REVIEW_COMMENT_ID）"
           fi
-
-          echo "$FIRST_REVIEW" > first_review_full.md
-          echo "$FIRST_COMMENT_ID" > first_comment_id.txt
-          echo "$FOLLOWUP_COMMENT_ID" > followup_comment_id.txt
 
       - name: Claude Review
         env:
@@ -103,21 +93,27 @@ jobs:
         run: |
           PR_NUMBER=$(cat pr_number.txt)
           DIFF=$(cat pr.diff)
-          REVIEW_MODE=$(cat review_mode.txt)
+          REVIEW_COMMENT_ID=$(cat review_comment_id.txt)
+          EXISTING_REVIEW=$(cat existing_review.md)
           IGNORE_LIST=$(cat ignore_list.txt)
-          FIRST_COMMENT_ID=$(cat first_comment_id.txt)
-          FOLLOWUP_COMMENT_ID=$(cat followup_comment_id.txt)
           PR_BODY="${PR_BODY:-（説明なし）}"
 
-          if [ "$REVIEW_MODE" = "first" ]; then
+          IS_FIRST=true
+          if [ -n "$EXISTING_REVIEW" ]; then
+            IS_FIRST=false
+          fi
+
+          if [ "$IS_FIRST" = "true" ]; then
             DIFF_LIMIT=10000
             MAX_TOKENS=3000
-            COMPARE_INSTRUCTION=""
+            EXISTING_INSTRUCTION=""
           else
             DIFF_LIMIT=5000
-            MAX_TOKENS=2000
-            FIRST_REVIEW_FOR_API=$(cat first_review_for_api.md)
-            COMPARE_INSTRUCTION="フォローアップレビューを行ってください。\n\n出力の最初の行は必ず以下の形式にしてください（修正済みがなければ空）:\nFIXED:1,2\n\n次に以下を出力:\n\n### 修正済み\n初回指摘のうち修正されたものをリスト\n\n### 未修正\n初回指摘のうち残っているものをリスト\n\n### 新規指摘\n今回新たに見つかった問題を通常の指摘形式で（番号は初回の続きから）。なければ「なし」\n\n初回レビュー内容:\n${FIRST_REVIEW_FOR_API}\n\n---\n"
+            MAX_TOKENS=2500
+            if [ ${#EXISTING_REVIEW} -gt 4000 ]; then
+              EXISTING_REVIEW="${EXISTING_REVIEW:0:4000}"$'\n[... 省略 ...]'
+            fi
+            EXISTING_INSTRUCTION="## 既存のレビューコメント\n以下の既存コメントを更新してください。修正済みの指摘は「修正済み」セクションに移動し、新しい指摘は該当カテゴリに追加してください。\n\n${EXISTING_REVIEW}\n\n---\n"
           fi
 
           DIFF_TRUNCATED=""
@@ -147,7 +143,7 @@ jobs:
                 --arg diff "$DIFF" \
                 --arg title "$PR_TITLE" \
                 --arg body "$PR_BODY" \
-                --arg compare "$COMPARE_INSTRUCTION" \
+                --arg existing "$EXISTING_INSTRUCTION" \
                 --arg ignore "$IGNORE_INSTRUCTION" \
                 --argjson max_tokens "$MAX_TOKENS" \
                 '{
@@ -160,7 +156,7 @@ jobs:
                   }],
                   messages: [{
                     role: "user",
-                    content: ($ignore + "PRタイトル: " + $title + "\nPR説明: " + $body + "\n\n差分:\n```diff\n" + $diff + "\n```\n\n" + $compare)
+                    content: ($ignore + "PRタイトル: " + $title + "\nPR説明: " + $body + "\n\n差分:\n```diff\n" + $diff + "\n```\n\n" + $existing)
                   }]
                 }'
               )")
@@ -177,29 +173,6 @@ jobs:
 
           [ -z "$REVIEW" ] && REVIEW="⚠️ APIエラー（3回リトライ後も失敗）: ${ERROR:-不明なエラー}"
 
-          if [ "$REVIEW_MODE" = "followup" ]; then
-            FIXED_NUMBERS=$(echo "$REVIEW" | head -1 | grep -oP '(?<=FIXED:)[\d,]+' || echo "")
-            REVIEW_BODY=$(echo "$REVIEW" | tail -n +2)
-            NEW_FINDINGS=$(echo "$REVIEW_BODY" | awk '/^### 新規指摘/{found=1; next} found{print}')
-
-            echo "$FIXED_NUMBERS" > fixed_numbers.txt
-            echo "$NEW_FINDINGS" > new_findings.md
-            echo "$REVIEW_BODY" > review_body_clean.md
-
-            python3 .github/scripts/update_review.py
-
-            if [ -n "$FIRST_COMMENT_ID" ] && [ "$FIRST_COMMENT_ID" != "null" ]; then
-              gh api repos/$REPO/issues/comments/$FIRST_COMMENT_ID \
-                --method PATCH \
-                --field body="$(cat updated_first_review.md)"
-              echo "初回コメントを更新しました"
-            fi
-
-            REVIEW_CONTENT=$(cat review_body_clean.md)
-          else
-            REVIEW_CONTENT="$REVIEW"
-          fi
-
           if [ -n "$IGNORE_LIST" ]; then
             IGNORE_NOTICE="> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\` — 解除するには \`/claude-ignore\` コメントを削除してください。"
           else
@@ -207,34 +180,27 @@ jobs:
           fi
 
           {
-            if [ "$REVIEW_MODE" = "first" ]; then
-              echo "## 🤖 Claude Code Review — 初回レビュー"
-              echo "<!-- claude-first-review -->"
-              echo ""
-              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
-            else
-              echo "## 🤖 Claude Code Review — フォローアップ"
-              echo "<!-- claude-followup-review -->"
-              echo ""
-              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
-            fi
+            echo "## 🤖 Claude Code Review"
+            echo "<!-- claude-review -->"
+            echo ""
+            echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
             [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
             [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
             echo ""
             echo "---"
             echo ""
-            echo "$REVIEW_CONTENT"
+            echo "$REVIEW"
             echo ""
             echo "---"
             echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
           } > post_body.md
 
-          if [ "$REVIEW_MODE" = "first" ]; then
-            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file post_body.md
-          elif [ -n "$FOLLOWUP_COMMENT_ID" ] && [ "$FOLLOWUP_COMMENT_ID" != "null" ]; then
-            gh api repos/$REPO/issues/comments/$FOLLOWUP_COMMENT_ID \
+          if [ -n "$REVIEW_COMMENT_ID" ] && [ "$REVIEW_COMMENT_ID" != "null" ]; then
+            gh api repos/$REPO/issues/comments/$REVIEW_COMMENT_ID \
               --method PATCH \
               --field body="$(cat post_body.md)"
+            echo "レビューコメントを更新しました"
           else
             gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file post_body.md
+            echo "レビューコメントを作成しました"
           fi
