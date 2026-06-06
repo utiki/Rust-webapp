@@ -13,8 +13,7 @@ jobs:
       github.event_name == 'pull_request' ||
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
-       (startsWith(github.event.comment.body, '/claude-ignore') ||
-        contains(github.event.comment.body, '@Review')))
+       startsWith(github.event.comment.body, '/claude-ignore'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -157,7 +156,6 @@ jobs:
             echo "<!-- claude-review -->"
             echo ""
             echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
-            echo "> 再レビューするには \`@Review\` とコメントしてください。"
             if [ -n "$IGNORE_LIST" ]; then
               echo ""
               echo "> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\`"
