@@ -34,10 +34,17 @@ for num in fixed_nums:
     )
     match = pattern.search(updated_active)
     if match:
-        first_line = match.group(0).split('\n')[0]
-        # 太字を外して取り消し線をつける
-        clean = re.sub(r'\*\*' + re.escape(num) + r'\.\*\*', f'{num}.', first_line).strip()
-        resolved_items.append(f'~~{clean}~~ ✅')
+        full_block = match.group(0).strip()
+        lines = full_block.split('\n')
+        first_line = lines[0]
+        rest = '\n'.join(lines[1:])
+        # 1行目の番号の太字を外して取り消し線をつける
+        clean_first = re.sub(r'\*\*' + re.escape(num) + r'\.\*\*', f'{num}.', first_line).strip()
+        # 全文を保持して末尾に ✅ を付ける
+        resolved_block = f'~~{clean_first}~~ ✅'
+        if rest.strip():
+            resolved_block += '\n' + rest
+        resolved_items.append(resolved_block)
         updated_active = updated_active[:match.start()] + updated_active[match.end():]
 
 # 新規指摘をカテゴリセクションに追加
@@ -73,7 +80,7 @@ updated_active = re.sub(r'\| 🟢 Suggestion \| \d+件 \|', f'| 🟢 Suggestion 
 # 修正済みセクションを末尾に配置（件数付き）
 count = len(resolved_items)
 resolved_section = f'### ✅ 修正済み（{count}件）\n\n'
-resolved_section += '\n'.join(resolved_items) if resolved_items else 'なし'
+resolved_section += '\n\n---\n\n'.join(resolved_items) if resolved_items else 'なし'
 
 open('updated_comment.md', 'w').write(
     updated_active.rstrip() + '\n\n---\n\n' + resolved_section
