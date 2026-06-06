@@ -40,7 +40,8 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
     echo "pub fn placeholder() {}" > src/lib.rs && \
-    cargo build --release --features ssr 2>/dev/null || true
+    cargo build --release --features ssr 2>/dev/null || true && \
+    rm -rf src
 
 # ソースコードをコピーしてビルド
 COPY . .
