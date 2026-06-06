@@ -54,7 +54,7 @@ jobs:
               --arg title "$PR_TITLE" \
               --arg body "$PR_BODY" \
               '{
-                model: "claude-sonnet-4-20250514",
+                model: "claude-sonnet-4-6",
                 max_tokens: 2048,
                 messages: [{
                   role: "user",
@@ -63,8 +63,14 @@ jobs:
               }'
             )")
 
-          # レスポンスからテキストを抽出
-          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "レビューの取得に失敗しました"')
+          # エラーレスポンスの確認
+          ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
+          if [ -n "$ERROR" ]; then
+            echo "API Error: $ERROR"
+            REVIEW="⚠️ APIエラー: $ERROR"
+          else
+            REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // "レビューの取得に失敗しました"')
+          fi
 
           # レビュー内容をファイルに書き出す（特殊文字の影響を回避）
           {
