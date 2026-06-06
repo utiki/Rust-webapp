@@ -43,7 +43,7 @@ jobs:
           fi
           echo "$PR_NUMBER" > pr_number.txt
 
-          git diff "origin/$BASE"..."origin/$HEAD" \
+          git diff "origin/$BASE".."origin/$HEAD" \
             -- ':!.github/*' ':!*.lock' ':!*.min.js' ':!*.min.css' ':!dist/*' ':!target/*' \
             > pr.diff
           echo "diff size: $(wc -c < pr.diff) bytes"
