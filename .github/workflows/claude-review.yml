@@ -83,6 +83,8 @@ jobs:
           ID=$(echo "$COMMENT" | jq -r '.id // ""')
           echo "$ID" > comment_id.txt
           echo "$COMMENT" | jq -r '.body // ""' > existing_review.md
+          echo "COMMENT_ID: $ID"
+          echo "MODE: $(cat $GITHUB_OUTPUT | grep mode || echo 'not set')"
           if [ -z "$ID" ]; then
             echo "mode=first" >> $GITHUB_OUTPUT
           else
@@ -120,6 +122,11 @@ jobs:
             USER_MSG="${IGNORE_INSTR}## 既存のレビューコメント\n${EXISTING_BODY}\n\n## 新しいdiff\n\`\`\`diff\n${DIFF}\n\`\`\`"
           fi
 
+          echo "=== DEBUG ==="
+          echo "MODE: $MODE"
+          echo "EXISTING_BODY size: ${#EXISTING_BODY}"
+          echo "DIFF size: ${#DIFF}"
+          RESPONSE=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null) && echo "API ERROR: $RESPONSE" || true
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
