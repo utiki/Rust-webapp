@@ -77,10 +77,12 @@ jobs:
 
           echo "$REVIEW_COMMENT_ID" > review_comment_id.txt
           echo "$EXISTING_REVIEW" > existing_review.md
+
           if [ -z "$EXISTING_REVIEW" ]; then
-            echo "初回レビューです"
+            echo "first" > review_mode.txt
           else
-            echo "既存コメントを更新します（ID: $REVIEW_COMMENT_ID）"
+            echo "followup" > review_mode.txt
+            python3 .github/scripts/extract_findings.py
           fi
 
       - name: Claude Review
@@ -93,30 +95,20 @@ jobs:
         run: |
           PR_NUMBER=$(cat pr_number.txt)
           DIFF=$(cat pr.diff)
+          REVIEW_MODE=$(cat review_mode.txt)
           REVIEW_COMMENT_ID=$(cat review_comment_id.txt)
-          EXISTING_REVIEW=$(cat existing_review.md)
           IGNORE_LIST=$(cat ignore_list.txt)
           PR_BODY="${PR_BODY:-（説明なし）}"
 
-          IS_FIRST=true
-          if [ -n "$EXISTING_REVIEW" ]; then
-            IS_FIRST=false
-          fi
-
-          if [ "$IS_FIRST" = "true" ]; then
+          DIFF_TRUNCATED=""
+          if [ "$REVIEW_MODE" = "first" ]; then
             DIFF_LIMIT=10000
             MAX_TOKENS=3000
-            EXISTING_INSTRUCTION=""
           else
             DIFF_LIMIT=5000
-            MAX_TOKENS=2500
-            if [ ${#EXISTING_REVIEW} -gt 4000 ]; then
-              EXISTING_REVIEW="${EXISTING_REVIEW:0:4000}"$'\n[... 省略 ...]'
-            fi
-            EXISTING_INSTRUCTION="以下の既存レビューコメントを更新してください。各指摘をdiffと照合し、修正済みかどうか判断してコメントを再構成してください。\n\n=== 既存のレビューコメント ===\n${EXISTING_REVIEW}\n=== ここまで ===\n\n"
+            MAX_TOKENS=2000
           fi
 
-          DIFF_TRUNCATED=""
           if [ ${#DIFF} -gt $DIFF_LIMIT ]; then
             DIFF="${DIFF:0:$DIFF_LIMIT}"$'\n\n[... diff が大きいため省略されました ...]'
             DIFF_TRUNCATED="⚠️ **diff が大きいため一部省略されています。**"
@@ -126,6 +118,13 @@ jobs:
             IGNORE_INSTRUCTION="除外指定: 以下の番号の指摘は出力しないでください: ${IGNORE_LIST}\n\n"
           else
             IGNORE_INSTRUCTION=""
+          fi
+
+          if [ "$REVIEW_MODE" = "first" ]; then
+            USER_CONTENT="${IGNORE_INSTRUCTION}PRタイトル: ${PR_TITLE}\nPR説明: ${PR_BODY}\n\n差分:\n\`\`\`diff\n${DIFF}\n\`\`\`"
+          else
+            FINDINGS_LIST=$(cat findings_list.txt)
+            USER_CONTENT="以下の既存の指摘リストと新しいdiffを照合し、必ずこの形式のみで出力してください:\n\nFIXED:4,5  （修正済み番号をカンマ区切りで、なければ FIXED:）\n\nNEW_FINDINGS:\n（新規指摘を通常フォーマットで。なければ「なし」）\n\n既存の指摘:\n${FINDINGS_LIST}\n\ndiff:\n\`\`\`diff\n${DIFF}\n\`\`\`"
           fi
 
           MAX_RETRY=3
@@ -140,11 +139,7 @@ jobs:
               -H "content-type: application/json" \
               -d "$(jq -n \
                 --rawfile system_prompt .github/review-prompt.txt \
-                --arg diff "$DIFF" \
-                --arg title "$PR_TITLE" \
-                --arg body "$PR_BODY" \
-                --arg existing "$EXISTING_INSTRUCTION" \
-                --arg ignore "$IGNORE_INSTRUCTION" \
+                --arg user_content "$USER_CONTENT" \
                 --argjson max_tokens "$MAX_TOKENS" \
                 '{
                   model: "claude-sonnet-4-6",
@@ -154,10 +149,7 @@ jobs:
                     text: $system_prompt,
                     cache_control: {type: "ephemeral"}
                   }],
-                  messages: [{
-                    role: "user",
-                    content: ($ignore + "PRタイトル: " + $title + "\nPR説明: " + $body + "\n\n差分:\n```diff\n" + $diff + "\n```\n\n" + $existing)
-                  }]
+                  messages: [{role: "user", content: $user_content}]
                 }'
               )")
 
@@ -173,27 +165,56 @@ jobs:
 
           [ -z "$REVIEW" ] && REVIEW="⚠️ APIエラー（3回リトライ後も失敗）: ${ERROR:-不明なエラー}"
 
-          if [ -n "$IGNORE_LIST" ]; then
-            IGNORE_NOTICE="> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\` — 解除するには \`/claude-ignore\` コメントを削除してください。"
+          if [ "$REVIEW_MODE" = "followup" ]; then
+            FIXED_NUMBERS=$(echo "$REVIEW" | grep '^FIXED:' | sed 's/FIXED://' | tr -d ' ')
+            NEW_FINDINGS=$(echo "$REVIEW" | awk '/^NEW_FINDINGS:/{found=1; next} found{print}')
+            echo "$FIXED_NUMBERS" > fixed_numbers.txt
+            echo "$NEW_FINDINGS" > new_findings.md
+            python3 .github/scripts/update_comment.py
+            # ヘッダーと更新済み本文を結合
+            if [ -n "$IGNORE_LIST" ]; then
+              IGNORE_NOTICE="> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\` — 解除するには \`/claude-ignore\` コメントを削除してください。"
+            else
+              IGNORE_NOTICE=""
+            fi
+            {
+              echo "## 🤖 Claude Code Review"
+              echo "<!-- claude-review -->"
+              echo ""
+              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
+              [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
+              [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
+              echo ""
+              echo "---"
+              echo ""
+              cat updated_comment.md
+              echo ""
+              echo "---"
+              echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
+            } > post_body.md
           else
-            IGNORE_NOTICE=""
+            if [ -n "$IGNORE_LIST" ]; then
+              IGNORE_NOTICE="> 🚫 **除外中**: \`$(echo "$IGNORE_LIST" | sed 's/,/, /g')\` — 解除するには \`/claude-ignore\` コメントを削除してください。"
+            else
+              IGNORE_NOTICE=""
+            fi
+            {
+              echo "## 🤖 Claude Code Review"
+              echo "<!-- claude-review -->"
+              echo ""
+              echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
+              [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
+              [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
+              echo ""
+              echo "---"
+              echo ""
+              echo "$REVIEW"
+              echo ""
+              echo "---"
+              echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
+            } > post_body.md
+            POST_BODY=$(cat post_body.md)
           fi
-
-          {
-            echo "## 🤖 Claude Code Review"
-            echo "<!-- claude-review -->"
-            echo ""
-            echo "> 指摘を除外するには \`/claude-ignore 1,2,4\` のように番号でコメントしてください。"
-            [ -n "$IGNORE_NOTICE" ] && echo "" && echo "$IGNORE_NOTICE"
-            [ -n "$DIFF_TRUNCATED" ] && echo "" && echo "$DIFF_TRUNCATED"
-            echo ""
-            echo "---"
-            echo ""
-            echo "$REVIEW"
-            echo ""
-            echo "---"
-            echo "*Powered by Claude Sonnet 4.6 — 自動生成されたレビューです。最終判断は人間が行ってください。*"
-          } > post_body.md
 
           if [ -n "$REVIEW_COMMENT_ID" ] && [ "$REVIEW_COMMENT_ID" != "null" ]; then
             gh api repos/$REPO/issues/comments/$REVIEW_COMMENT_ID \
