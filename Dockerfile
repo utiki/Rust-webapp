@@ -10,14 +10,11 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js と Sass をインストール（Dart Sass の代わり）
-RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-      echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
-      > /etc/apt/sources.list.d/nodesource.list && \
-      apt-get update && apt-get install -y nodejs && \
-      npm install -g sass && \
-      rm -rf /var/lib/apt/lists/*
+# node:22-slim をベースにするか、公式インストールスクリプトを使用する
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g sass && \
+    rm -rf /var/lib/apt/lists/*
 
 # WASMターゲットを追加
 RUN rustup target add wasm32-unknown-unknown
@@ -26,6 +23,7 @@ RUN rustup target add wasm32-unknown-unknown
 RUN curl -L \
     https://github.com/leptos-rs/cargo-leptos/releases/download/v0.3.6/cargo-leptos-x86_64-unknown-linux-gnu.tar.gz \
     -o /tmp/cargo-leptos.tar.gz && \
+    echo "<期待するSHA256ハッシュ>  /tmp/cargo-leptos.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/cargo-leptos.tar.gz -C /tmp/ && \
     find /tmp -name 'cargo-leptos' -type f -exec install -m 755 {} /usr/local/bin/cargo-leptos \; && \
     rm -f /tmp/cargo-leptos.tar.gz
@@ -42,7 +40,7 @@ COPY Cargo.toml Cargo.lock ./
 
 # ソースコードをコピーしてビルド
 COPY . .
-RUN RUST_BACKTRACE=full cargo leptos build --release
+RUN cargo leptos build --release
 
 # ============================================================
 # Stage 2: 実行環境（最小イメージ）
