@@ -82,8 +82,6 @@ jobs:
           ID=$(echo "$COMMENT" | jq -r '.id // ""')
           echo "$ID" > comment_id.txt
           echo "$COMMENT" | jq -r '.body // ""' > existing_review.md
-          echo "COMMENT_ID: $ID"
-          echo "MODE: $(cat $GITHUB_OUTPUT | grep mode || echo 'not set')"
           if [ -z "$ID" ]; then
             echo "mode=first" >> $GITHUB_OUTPUT
           else
@@ -120,33 +118,17 @@ jobs:
             } > user_msg.txt
             MESSAGES=$(jq -n --rawfile msg user_msg.txt '[{role:"user",content:$msg}]')
           else
-            PROMPT_FILE=".github/followup-prompt.txt"
-            MAX_TOKENS=2500
+            PROMPT_FILE=".github/review-prompt.txt"
+            MAX_TOKENS=3000
             EXISTING_BODY=$(awk 'p; /^---$/{p=1}' existing_review.md | sed '/<\/details>/d')
-            # マルチターン: 既存レビューをassistantメッセージに入れてClaudeに「自分が書いた」と認識させる
             {
               [ -n "$IGNORE_INSTR" ] && printf '%s\n\n' "$IGNORE_INSTR"
-              printf '上記のレビューコメントを以下のdiffに基づいて更新してください。\n\n取り消し線のルール（厳格に適用）:\n- diffの `-` 行に指摘された具体的なコードが完全に含まれている場合のみ取り消し線を入れる\n- 少しでも迷った場合は取り消し線を入れない\n- 関係のない指摘には絶対に触らない\n\n```diff\n%s\n```\n' \
-                "$DIFF"
-            } > user_msg2.txt
-            MESSAGES=$(jq -n \
-              --arg existing "$EXISTING_BODY" \
-              --rawfile msg2 user_msg2.txt \
-              '[
-                {role:"user", content:"以下のコードレビューコメントを確認してください。"},
-                {role:"assistant", content:$existing},
-                {role:"user", content:$msg2}
-              ]')
-          fi
-
-          echo "=== DEBUG ==="
-          echo "MODE: $MODE"
-          echo "EXISTING_BODY size: ${#EXISTING_BODY}"
-          echo "DIFF size: ${#DIFF}"
-          RESPONSE=$(echo "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null) && echo "API ERROR: $RESPONSE" || true
-          if [ "$MODE" = "first" ]; then
+              printf '## 前回のレビュー\n\n%s\n\n## 今回のdiff\n\n```diff\n%s\n```\n\n## 指示\n前回のレビューと今回のdiffを照合して更新されたレビューを生成してください。\n- 前回の指摘で今回のdiffで修正されているもの → 行頭の絵文字を ✅ に変えて「（修正済み）」と追記する\n- 前回の指摘でまだ未修正のもの → そのまま残す\n- 今回新たに見つかった問題 → 前回の最大番号の続きから追加する\n- サマリーの件数は未修正の指摘のみカウントする（✅ は含めない）\n- 修正済みの判断: diffの `-` 行に指摘コードが含まれている場合のみ。迷ったら未修正とする\n' \
+                "$EXISTING_BODY" "$DIFF"
+            } > user_msg.txt
             MESSAGES=$(jq -n --rawfile msg user_msg.txt '[{role:"user",content:$msg}]')
           fi
+
 
           RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
